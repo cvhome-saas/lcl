@@ -24,8 +24,13 @@ export function variables(catalog: Catalog, state: Pick<State, 'id' | 'project' 
     return v;
 }
 
+/** Every service (processes and containers) with its port for this stack — what `{{#each services}}` iterates. */
+export function serviceList(catalog: Catalog, ports: PortMap): Array<{ name: string; port: number }> {
+    return [...catalog.services.map((s) => ({ name: s.name, port: ports.services[s.name] })), ...Object.keys(catalog.containers).map((n) => ({ name: n, port: ports.services[n] }))];
+}
+
 export function renderFiles(catalog: Catalog, vars: Vars, ports: PortMap): string[] {
-    const list = [...catalog.services.map((s) => ({ name: s.name, port: ports.services[s.name] })), ...Object.keys(catalog.containers).map((n) => ({ name: n, port: ports.services[n] }))];
+    const list = serviceList(catalog, ports);
     const written: string[] = [];
     for (const f of catalog.config.files) {
         const template = readFileSync(join(catalog.root, f.template), 'utf8');

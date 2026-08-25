@@ -2,8 +2,8 @@
 
 `./extra/scripts/lcl` starts, supervises and inspects a local stack described by an **`lcl.yml`** at the project
 root. The engine (this directory) is project-agnostic: it knows how to run gradle tasks, npm/exec commands and
-docker compose services, allocate ports, render files, probe health, keep logs and an audit trail. What to run is
-entirely in `lcl.yml` — cvhome's is at the repository root, its Spring override template in `extra/lcl-config/`.
+docker compose services, allocate ports, pass env, probe health, keep logs and an audit trail. What to run is
+entirely in `lcl.yml` at the repository root.
 
 ```bash
 ./extra/scripts/lcl start -d              # the default stack, in the background, returns when healthy
@@ -33,7 +33,7 @@ compose:
   default: [postgres]                 # started by `lcl start`; `--infra all` / `--infra a,b` override
   env: { NAMESPACE: example.com }     # extra compose env (LCL_PORT_<SERVICE> is always provided)
 env: { SOME_VAR: "${stack}" }         # for every process
-files:                                # rendered per stack before anything starts
+files:                                # optional: files rendered per stack before anything starts
   - { path: "${stack.dir}/app.yml", template: lcl-config/app.yml.tpl }
 defaults:                             # per runner type, overridden by each service
   gradle: { task: bootRun, args: [...], health: { path: /actuator/health, expect: '"status":"UP"' } }
@@ -57,8 +57,9 @@ Service fields: `type` (`gradle` | `npm` | `exec` | `container`), `port`, `after
 container: `compose` service name, `container-port`.
 
 Variables in any string: `${stack}` `${stack.dir}` `${root}` `${project}` `${offset}` `${service}` `${port}`
-`${port.<service>}` `${port.<compose service>:<container port>}` `${env.NAME}`. Templates additionally support
-`{{#each services}} … {{name}} {{port}} {{#unless last}},{{/unless}} … {{/each}}`.
+`${port.<service>}` `${port.<compose service>:<container port>}` `${env.NAME}`. Env values and template files also
+support `{{#each services}} … {{name}} {{port}} {{#unless last}},{{/unless}} … {{/each}}` — e.g. a
+`SPRING_APPLICATION_JSON` env value that lists every service's port for Spring.
 
 ## Stacks and ports
 
@@ -86,8 +87,9 @@ handy when the default stack should keep the well-known ports and every other st
 ## cvhome specifics (all in `lcl.yml`, none in the engine)
 
 - every service lists its port explicitly (kept equal to what the Spring services bind via `common-config.yml`);
-- `extra/lcl-config/spring-instance.yml.tpl` → `build/lcl/<stack>/spring-instance.yml`, passed to every Spring
-  service as `--spring.config.additional-location` (service ports, discovery URIs, datasource, MinIO, pod endpoint);
+- every Spring service receives `SPRING_APPLICATION_JSON` (defaults.gradle.env in `lcl.yml`): its own and every
+  other service's port, the local discovery table, datasource, MinIO and pod endpoint — Spring binds it with the
+  highest precedence, so nothing on disk is generated for Java;
 - gradle `--project-cache-dir` per stack and `NEXT_DIST_DIR` per stack (read by `storefront/next.config.ts`) so two
   stacks can run the same module from one checkout. Next rewrites `storefront/tsconfig.json` to include
   `<distDir>/types` when a non-default stack runs — a noise diff, safe to `git checkout` afterwards;
@@ -103,7 +105,7 @@ extra/lcl/src
   catalog.ts       lcl.yml → services in dependency levels, container services, compose ports (read from the compose file)
   instance.ts      stack name, build/lcl/<stack>/ paths, state.json, global registry (~/.cvhome/lcl)
   ports.ts         free-port probing (wildcard bind + lsof) and the offset policy
-  render.ts        variables, generated files, compose.env, compose.override.yml, urls
+  render.ts        variables, service list for {{#each}}, generated files, compose.env, compose.override.yml, urls
   supervisor.ts    the per-stack daemon: levels, health loop, crash policy, hooks, control socket
   proc.ts compose.ts control.ts health.ts logs.ts events.ts ui.ts yaml.ts
   commands/        start, stop/restart, status/urls/ports/list, logs/events/why/clean, doctor

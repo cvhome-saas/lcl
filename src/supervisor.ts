@@ -7,14 +7,14 @@ import { join } from 'node:path';
 import type { Socket } from 'node:net';
 import type { Catalog, Service } from './catalog.ts';
 import { Compose } from './compose.ts';
-import { evaluateWhen, interpolate, type Vars } from './config.ts';
+import { evaluateWhen, interpolate, renderTemplate, type Vars } from './config.ts';
 import { progress, serve, type Request } from './control.ts';
 import { EventLog } from './events.ts';
 import { httpAlive, httpProbe, tcpOpen } from './health.ts';
 import { pidAlive, registerInstance, saveState, unregisterInstance, type Paths, type ServiceRecord, type State, type StartOptions } from './instance.ts';
 import { LogWatcher } from './logs.ts';
 import { freePort, killTree, onSignals, spawnLogged, type Spawned } from './proc.ts';
-import { envName, renderComposeEnv, renderComposeOverride, renderFiles, urlsFor, variables, writeFile } from './render.ts';
+import { envName, renderComposeEnv, renderComposeOverride, renderFiles, serviceList, urlsFor, variables, writeFile } from './render.ts';
 import { dim, fmtDuration, green, red, say, sleep, warn, yellow } from './ui.ts';
 
 type Runtime = {
@@ -268,10 +268,11 @@ export class Supervisor {
         const env: NodeJS.ProcessEnv = { LCL_STACK: this.state.id, LCL_STACK_DIR: this.paths.dir };
         for (const [n, port] of Object.entries(this.state.ports.services)) env[envName(n)] = String(port);
         for (const i of this.catalog.infra) env[i.envVar] = String(this.state.ports.infra[i.key]);
-        for (const [k, v] of Object.entries(this.catalog.config.env)) env[k] = interpolate(v, vars, `env.${k}`);
+        const list = serviceList(this.catalog, this.state.ports);
+        for (const [k, v] of Object.entries(this.catalog.config.env)) env[k] = renderTemplate(v, vars, list, `env.${k}`);
         if (name) {
             const def = this.catalog.services.find((s) => s.name === name)?.def;
-            for (const [k, v] of Object.entries(def?.env ?? {})) env[k] = interpolate(v, vars, `services.${name}.env.${k}`);
+            for (const [k, v] of Object.entries(def?.env ?? {})) env[k] = renderTemplate(v, vars, list, `services.${name}.env.${k}`);
         }
         return env;
     }
