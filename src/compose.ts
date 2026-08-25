@@ -5,13 +5,13 @@ import { spawn, execFileSync } from 'node:child_process';
 import { appendFileSync, existsSync } from 'node:fs';
 
 export class Compose {
-    readonly root: string; readonly project: string; readonly envFile: string; readonly overrideFile: string; readonly logFile: string; readonly file: string;
-    constructor(root: string, project: string, envFile: string, overrideFile: string, logFile: string, file = 'docker-compose.yml') {
-        this.root = root; this.project = project; this.envFile = envFile; this.overrideFile = overrideFile; this.logFile = logFile; this.file = file;
+    readonly root: string; readonly project: string; readonly envFile: string; readonly overrideFile: string; readonly logFile: string; readonly files: string[];
+    constructor(root: string, project: string, envFile: string, overrideFile: string, logFile: string, files = ['compose.yml']) {
+        this.root = root; this.project = project; this.envFile = envFile; this.overrideFile = overrideFile; this.logFile = logFile; this.files = files;
     }
 
     private base(): string[] {
-        const files = ['-f', this.file, ...(existsSync(this.overrideFile) ? ['-f', this.overrideFile] : [])];
+        const files = [...this.files.flatMap((file) => ['-f', file]), ...(existsSync(this.overrideFile) ? ['-f', this.overrideFile] : [])];
         return ['compose', '-p', this.project, '--env-file', this.envFile, ...files];
     }
 

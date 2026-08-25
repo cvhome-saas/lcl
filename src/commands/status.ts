@@ -1,10 +1,10 @@
-import { request } from '../control.ts';
-import { listInstances, loadState, pidAlive, type ServiceRecord, type State } from '../instance.ts';
-import { shiftedPorts } from '../ports.ts';
-import { envName, urlsFor, variables } from '../render.ts';
-import { tcpOpen } from '../health.ts';
-import { bold, cyan, dim, fmtDuration, green, red, table, yellow } from '../ui.ts';
-import { liveSupervisor, type Context } from './common.ts';
+import { request } from '../control.js';
+import { composeProjectName, listInstances, loadState, pidAlive, type ServiceRecord, type State } from '../instance.js';
+import { shiftedPorts } from '../ports.js';
+import { envName, urlsFor, variables } from '../render.js';
+import { tcpOpen } from '../health.js';
+import { bold, cyan, dim, fmtDuration, green, red, table, yellow } from '../ui.js';
+import { liveSupervisor, type Context } from './common.js';
 import { execFileSync } from 'node:child_process';
 import { relative } from 'node:path';
 
@@ -30,15 +30,17 @@ export async function printStatus(ctx: Context, json = false): Promise<void> {
     const rows: string[][] = [];
     for (const s of ctx.catalog.services) {
         const rec: ServiceRecord | undefined = state.services[s.name];
-        const port = state.ports.services[s.name];
+        const assigned = Object.entries(state.ports.services).filter(([name]) => name.startsWith(`${s.name}.`));
+        const port = rec?.port ?? assigned[0]?.[1];
+        const shownPorts = assigned.map(([name, value]) => `${name.slice(s.name.length + 1)}:${value}`).join(', ');
         if (!rec) {
             const busy = port ? await tcpOpen(port) : false;
-            rows.push([s.name, busy ? yellow('port-used') : dim('not started'), port ? String(port) : '-', '', '', '', '']);
+            rows.push([s.name, busy ? yellow('port-used') : dim('not started'), shownPorts || '-', '', '', '', '']);
             continue;
         }
         const alive = live ? rec.state : rec.pid && pidAlive(rec.pid) ? rec.state : port && (await tcpOpen(port)) ? 'port-used' : 'stopped';
         rows.push([
-            s.name, colour(alive), port ? String(port) : '-', rec.pid ? String(rec.pid) : '-',
+            s.name, colour(alive), shownPorts || '-', rec.pid ? String(rec.pid) : '-',
             rec.startedAt && (alive === 'up' || alive === 'degraded' || alive === 'starting') ? fmtDuration(Date.now() - Date.parse(rec.startedAt)) : '-',
             rec.errors ? (rec.errors > 0 ? yellow(String(rec.errors)) : '0') : '0',
             (rec.health ?? '').slice(0, 60),
@@ -51,7 +53,11 @@ export async function printStatus(ctx: Context, json = false): Promise<void> {
 
 export function printUrls(ctx: Context): void {
     const ports = ctx.state?.ports ?? shiftedPorts(ctx.catalog, 0);
-    const vars = variables(ctx.catalog, { id: ctx.id, project: ctx.state?.project ?? `lcl-${ctx.catalog.config.name}-${ctx.id}`, ports }, ctx.paths);
+    const vars = variables(ctx.catalog, {
+        id: ctx.id,
+        project: ctx.state?.project ?? composeProjectName(ctx.catalog.config.name, ctx.id, ctx.root),
+        ports,
+    }, ctx.paths);
     const rows = urlsFor(ctx.catalog, vars).map(([k, v]) => [k, v]);
     if (!ctx.state) console.log(dim('(not started — showing the configured ports)'));
     console.log(table(rows));
@@ -70,8 +76,12 @@ export function printPorts(ctx: Context, mode: 'table' | 'json' | 'env'): void {
     if (!ctx.state) console.log(dim('(not started — configured ports; a start shifts them if any is taken)'));
     else console.log(`offset +${ports.offset}`);
     const rows: string[][] = [];
-    for (const s of ctx.catalog.services) rows.push([s.name, s.port === undefined ? '-' : String(ports.services[s.name]), s.port === undefined ? '-' : String(s.port), s.def.type === 'gradle' ? `gradle ${s.def.module}` : `${s.def.type} ${s.def.dir ?? ''} ${(s.def.command ?? []).join(' ')}`.trim()]);
-    for (const [name, c] of Object.entries(ctx.catalog.containers)) rows.push([name, String(ports.services[name]), String(c.port), `container (compose ${c.compose})`]);
+    for (const service of ctx.catalog.services) {
+        const assigned = Object.entries(ports.services).filter(([name]) => name.startsWith(`${service.name}.`));
+        const configured = Object.entries(service.ports);
+        const runner = `${service.def.cwd ?? '.'} ${service.def.shell ?? (service.def.command ?? []).join(' ')}`;
+        rows.push([service.name, assigned.map(([name, value]) => `${name.slice(service.name.length + 1)}:${value}`).join(', ') || '-', configured.map(([name, value]) => `${name}:${value}`).join(', ') || '-', runner]);
+    }
     for (const i of ctx.catalog.infra) rows.push([i.label, String(ports.infra[i.key]), String(i.port), `container ${i.image}`]);
     console.log(table(rows, ['service', 'port', 'configured', 'runner']));
 }

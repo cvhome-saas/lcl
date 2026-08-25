@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/cvhome-saas/lcl/main/schema/lcl.schema.json",
+  "title": "lcl.yml",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "name", "services"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "version": { "const": 1 },
+    "name": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
+    "ports": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "step": { "type": "integer", "minimum": 1, "maximum": 60000 },
+        "skip-configured": { "type": "boolean" }
+      }
+    },
+    "build": { "$ref": "#/$defs/argv" },
+    "hosts": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+    "environment": { "$ref": "#/$defs/environment" },
+    "defaults": { "$ref": "#/$defs/serviceDefaults" },
+    "compose": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["files"],
+      "properties": {
+        "files": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1 },
+        "default": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+        "environment": { "$ref": "#/$defs/environment" }
+      }
+    },
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "template"],
+        "properties": { "path": { "type": "string" }, "template": { "type": "string" } }
+      }
+    },
+    "hooks": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "before-start": { "$ref": "#/$defs/hooks" },
+        "after-up": { "$ref": "#/$defs/hooks" },
+        "after-stop": { "$ref": "#/$defs/hooks" }
+      }
+    },
+    "services": { "type": "object", "additionalProperties": { "$ref": "#/$defs/service" } },
+    "urls": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["label", "url"],
+        "properties": { "label": { "type": "string", "minLength": 1 }, "url": { "type": "string", "minLength": 1 } }
+      }
+    }
+  },
+  "$defs": {
+    "argv": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+    "environment": { "type": "object", "additionalProperties": { "type": ["string", "number", "boolean"] } },
+    "command": {
+      "oneOf": [
+        { "$ref": "#/$defs/argv" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "command": { "$ref": "#/$defs/argv" },
+            "shell": { "type": "string", "minLength": 1 },
+            "cwd": { "type": "string" }
+          },
+          "oneOf": [{ "required": ["command"] }, { "required": ["shell"] }]
+        }
+      ]
+    },
+    "health": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": { "enum": ["http", "tcp", "log", "process"] },
+        "port": { "type": "string", "minLength": 1 },
+        "path": { "type": "string" },
+        "expect": { "type": "string" },
+        "ready-log": { "type": "string" },
+        "timeout": { "type": "integer", "minimum": 1, "maximum": 3600 }
+      }
+    },
+    "serviceDefaults": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "environment": { "$ref": "#/$defs/environment" },
+        "health": { "$ref": "#/$defs/health" },
+        "prepare": { "type": "array", "items": { "$ref": "#/$defs/command" } }
+      }
+    },
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "description": { "type": "string" },
+        "cwd": { "type": "string" },
+        "command": { "$ref": "#/$defs/argv" },
+        "shell": { "type": "string", "minLength": 1 },
+        "prepare": { "type": "array", "items": { "$ref": "#/$defs/command" } },
+        "depends-on": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+        "ports": {
+          "type": "object",
+          "additionalProperties": { "type": "integer", "minimum": 1, "maximum": 65535 },
+          "propertyNames": { "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$" }
+        },
+        "environment": { "$ref": "#/$defs/environment" },
+        "health": { "$ref": "#/$defs/health" }
+      },
+      "oneOf": [{ "required": ["command"] }, { "required": ["shell"] }]
+    },
+    "hook": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "service": { "type": "string" },
+        "when": { "type": "string" },
+        "command": { "$ref": "#/$defs/argv" },
+        "shell": { "type": "string", "minLength": 1 },
+        "cwd": { "type": "string" }
+      },
+      "oneOf": [{ "required": ["command"] }, { "required": ["shell"] }]
+    },
+    "hooks": { "type": "array", "items": { "$ref": "#/$defs/hook" } }
+  }
+}

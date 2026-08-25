@@ -1,127 +1,211 @@
-# lcl — local stack runner
+# lcl
 
-`./extra/scripts/lcl` starts, supervises and inspects a local stack described by an **`lcl.yml`** at the project
-root. The engine (this directory) is project-agnostic: it knows how to run gradle tasks, npm/exec commands and
-docker compose services, allocate ports, pass env, probe health, keep logs and an audit trail. What to run is
-entirely in `lcl.yml` at the repository root.
+`lcl` runs a complex local stack from one `lcl.yml`. It allocates a stable set of ports, starts dependencies in
+readiness order, supervises foreground processes, manages optional Docker Compose infrastructure, and keeps logs and
+state for several named stacks at once.
+
+The runner is language-neutral. If a service can be launched as a foreground command, `lcl` can supervise it.
+
+## Install
+
+Node.js 22 or newer is required. macOS, Linux, and WSL2 are supported.
 
 ```bash
-./extra/scripts/lcl start -d              # the default stack, in the background, returns when healthy
-./extra/scripts/lcl start -d --stack xxx  # a second stack next to it (its ports shift to the next free sequence)
-./extra/scripts/lcl status                # state, port, pid, uptime, error count, health per service
-./extra/scripts/lcl urls                  # the URLs from lcl.yml, with THIS stack's ports
-./extra/scripts/lcl restart catalog       # one service; the rest keep running
-./extra/scripts/lcl why catalog           # exit code, health, port owner, command, env, last errors
-./extra/scripts/lcl logs catalog -f       # or: --errors, --grep RE, --since 10m
-./extra/scripts/lcl events -f             # the audit trail (build/lcl/<stack>/events.jsonl)
-./extra/scripts/lcl list                  # every running stack
-./extra/scripts/lcl stop [--stack xxx]    # that stack only; --hard also drops the compose volumes
+npm install -g @cvhome/lcl
+lcl --version
 ```
 
-`lcl --help` lists every command and flag. `--config <file>` points at another project's `lcl.yml`.
+Create a starter configuration:
 
-## lcl.yml
+```bash
+lcl init --template empty
+# also available: node, python, java, compose
+lcl validate
+```
+
+`lcl init` adds `.lcl/` to `.gitignore`. The only project configuration owned by the CLI is `lcl.yml`; runtime
+state stays under `.lcl/<stack>/`.
+
+## A small stack
 
 ```yaml
-name: myproject                       # compose projects are lcl-<name>-<stack>
+version: 1
+name: shop
+
 ports:
-  step: 1000                          # shift size when a configured port is taken
-  skip-configured: false              # true: never use the configured ports (same as --no-default-ports)
-build: [make, build]                  # run by `lcl start --build`
-hosts: [api.local, app.local]         # optional: hostnames `lcl doctor` expects in /etc/hosts
-compose:                              # optional: omit it and no Docker is needed
-  file: docker-compose.yml
-  default: [postgres]                 # started by `lcl start`; `--infra all` / `--infra a,b` override
-  env: { NAMESPACE: example.com }     # extra compose env (LCL_PORT_<SERVICE> is always provided)
-env: { SOME_VAR: "${stack}" }         # for every process
-files:                                # optional: files rendered per stack before anything starts
-  - { path: "${stack.dir}/app.yml", template: lcl-config/app.yml.tpl }
-defaults:                             # per runner type, overridden by each service
-  gradle: { task: bootRun, args: [...], health: { path: /actuator/health, expect: '"status":"UP"' } }
+  step: 1000
+
+compose:
+  files: [compose.yml]
+  default: [postgres]
+
 services:
-  api:      { type: gradle, module: ":api", port: 8080 }
-  billing:  { type: maven, module: billing, port: 8081, after: [api] }        # ./mvnw -pl billing spring-boot:run
-  worker:   { type: gradle, module: ":worker", after: [api] }                 # no port: up = process alive
-  indexer:  { type: exec, command: [./indexer], health: { ready-log: "listening" }, after: [api] }
-  web:      { type: npm, dir: web, command: [npm, run, dev], env: { PORT: "${port}" }, port: 3000, after: [api] }
-  grpc:     { type: exec, command: [./bin/grpc, --port, "${port}"], port: 7000, health: { type: tcp } }
-  edge:     { type: container, compose: nginx, port: 80 }        # a configured service served by a container
-hooks:
-  before-start: [{ shell: "./scripts/seed.sh ${port.postgres:5432}" }]
-  after-up:     [{ service: api, when: "${offset} != 0", shell: "curl -X POST http://localhost:${port.api}/reconfigure" }]
-  after-stop:   [{ shell: "echo bye" }]
+  catalog:
+    cwd: services/catalog
+    command: [python, -m, uvicorn, app:app, --port, "${port.catalog.http}"]
+    depends-on: [postgres]
+    ports:
+      http: 8080
+    health:
+      type: http
+      port: http
+      path: /health
+
+  storefront:
+    cwd: apps/storefront
+    prepare:
+      - [npm, run, build:libs]
+    command: [npm, run, dev, "--", --port, "${port.storefront.http}"]
+    depends-on: [catalog]
+    ports:
+      http: 3000
+    environment:
+      CATALOG_URL: "http://localhost:${port.catalog.http}"
+    health:
+      type: http
+      port: http
+      path: /
+
 urls:
-  - { label: app, url: "http://localhost:${port.web}" }
+  - { label: storefront, url: "http://localhost:${port.storefront.http}" }
 ```
 
-Service fields: `type` (`gradle` | `maven` | `npm` | `exec` | `container`), `port` (optional — a service without
-one is a worker: no port allocation, health = process alive or `ready-log`), `after` (start order; independent
-services start together with `--parallel N`), `env`, `health`; gradle/maven: `module`, `task`, `args`, `wrapper`
-(`./gradlew` / `./mvnw` by default); every process type: `dir`, `command`, `prep` (commands before start), and
-for npm `install` (where `node_modules` lives; `npm install` runs when missing); container: `compose` service
-name, `container-port`.
-
-Health: `type` = `http` (GET `path` on the port, optional `expect` substring; 401/403 count as reachable) |
-`tcp` (port accepts connections) | `log` (`ready-log` regex seen) | `none` (process alive). Defaults: `http` when
-`path` is set, `tcp` when the service has a port, `log`/`none` otherwise. `timeout` = seconds to become healthy.
-
-Containers: started with `docker compose -p lcl-<name>-<stack>`; those with a `HEALTHCHECK` are waited for until
-`healthy`, the others until their published ports accept connections. `--no-infra` skips them.
-
-Variables in any string: `${stack}` `${stack.dir}` `${root}` `${project}` `${offset}` `${service}` `${port}`
-`${port.<service>}` `${port.<compose service>:<container port>}` `${env.NAME}`. Env values and template files also
-support `{{#each services}} … {{name}} {{port}} {{#unless last}},{{/unless}} … {{/each}}` — e.g. a
-`SPRING_APPLICATION_JSON` env value that lists every service's port for Spring.
-
-## Stacks and ports
-
-`--stack <name>` (default `default`) selects the stack every command acts on. Each stack has its own supervisor,
-processes, compose project, state, logs and events under `build/lcl/<stack>/`.
-
-Configured ports are the default. If any is taken — another stack, a stray process — the **whole stack shifts by
-`ports.step`·k** to the first free sequence, and every `${port.…}` follows: generated files, env, hooks, urls,
-compose (a generated `compose.override.yml` with `ports: !override` for every published port, so the compose file
-needs no placeholders). `--ports configured` refuses to shift, `--ports offset=2` forces +2·step, and
-`--ports shift` / `--no-default-ports` never uses the configured ports at all (first free sequence at +step) —
-handy when the default stack should keep the well-known ports and every other stack must stay off them;
-`ports.skip-configured: true` in `lcl.yml` makes that the project default.
-
-## Health, crashes, audit
-
-- `health.path` + `expect` → HTTP probe on the service port (401/403 count as reachable); otherwise "HTTP answers";
-  `ready-log` accepts a log line as proof of readiness. Probed every 5 s; every transition is an event.
-- A crashed service is marked `crashed` and the rest keep running (`why` explains it). `--fail-fast` brings the
-  stack down instead; `--restart on-failure[:N]` restarts it with backoff.
-- `build/lcl/<stack>/events.jsonl`: `instance.*`, `infra.*`, `service.starting|up|degraded|crashed|stopped|
-  restarted|swept`, `hook.done|failed|skipped`, `command.*`. Logs: `build/lcl/<stack>/logs/<service>.log`
-  (+ `-prep`, `-install`, `-hook`, `compose`, `build`, `supervisor`).
-
-## cvhome specifics (all in `lcl.yml`, none in the engine)
-
-- every service lists its port explicitly (kept equal to what the Spring services bind via `common-config.yml`);
-- every Spring service receives `SPRING_APPLICATION_JSON` (defaults.gradle.env in `lcl.yml`): its own and every
-  other service's port, the local discovery table, datasource, MinIO and pod endpoint — Spring binds it with the
-  highest precedence, so nothing on disk is generated for Java;
-- gradle `--project-cache-dir` per stack and `NEXT_DIST_DIR` per stack (read by `storefront/next.config.ts`) so two
-  stacks can run the same module from one checkout. Next rewrites `storefront/tsconfig.json` to include
-  `<distDir>/types` when a non-default stack runs — a noise diff, safe to `git checkout` afterwards;
-- the spg container gets `LCL_PORT_<SERVICE>` for the Caddyfile upstreams (`{$LCL_PORT_CATALOG:8122}`);
-- an `after-up` hook rewrites uaa's seeded `web-app` redirect URIs on a shifted stack.
-
-## Layout
-
-```
-extra/lcl/src
-  main.ts          command line and dispatch
-  config.ts        lcl.yml schema, loader, ${…} interpolation, {{#each}} templates, `when:` evaluation
-  catalog.ts       lcl.yml → services in dependency levels, container services, compose ports (read from the compose file)
-  instance.ts      stack name, build/lcl/<stack>/ paths, state.json, global registry (~/.cvhome/lcl)
-  ports.ts         free-port probing (wildcard bind + lsof) and the offset policy
-  render.ts        variables, service list for {{#each}}, generated files, compose.env, compose.override.yml, urls
-  supervisor.ts    the per-stack daemon: levels, health loop, crash policy, hooks, control socket
-  proc.ts compose.ts control.ts health.ts logs.ts events.ts ui.ts yaml.ts
-  commands/        start, stop/restart, status/urls/ports/list, logs/events/why/clean, doctor
+```bash
+lcl start -d                         # start everything and return when ready
+lcl start storefront -d              # also starts catalog and postgres
+lcl status
+lcl urls
+lcl logs catalog -f
+lcl why catalog
+lcl restart catalog
+lcl stop
 ```
 
-No dependencies: Node ≥ 23.6 runs the TypeScript directly. POSIX only (macOS/Linux/WSL): process groups, `lsof`,
-`pgrep`, `sh -c` hooks and unix sockets are used.
+## Generic service contract
+
+Each entry in `services` is a foreground process:
+
+| Key | Meaning |
+|---|---|
+| `command` | Argument array executed without a shell. Preferred because quoting is unambiguous. |
+| `shell` | Explicit POSIX shell command for pipelines or shell expansion. Mutually exclusive with `command`. |
+| `cwd` | Working directory relative to `lcl.yml`. Defaults to the configuration directory. |
+| `prepare` | Commands run to completion before each service start. Entries may be argv arrays or command objects. |
+| `depends-on` | Source or Compose services that must be ready first. Transitive dependencies start automatically. |
+| `ports` | Any number of named TCP ports. All are shifted together when the configured sequence is occupied. |
+| `environment` | Environment values, with variable interpolation. |
+| `health` | `http`, `tcp`, `log`, or `process`; defaults to TCP for a service with ports and process-alive otherwise. |
+
+Examples for common ecosystems use the same fields:
+
+```yaml
+services:
+  spring:
+    command: [./gradlew, :api:bootRun, "--args=--server.port=${port.spring.http}"]
+    ports: { http: 8080 }
+
+  maven:
+    command: [./mvnw, -pl, billing, spring-boot:run, "-Dspring-boot.run.arguments=--server.port=${port.maven.http}"]
+    ports: { http: 8081 }
+
+  go:
+    command: [go, run, ./cmd/api]
+    environment: { PORT: "${port.go.http}" }
+    ports: { http: 8082 }
+
+  rust:
+    command: [cargo, run, --bin, worker]
+    environment: { PORT: "${port.rust.http}" }
+    ports: { http: 8083 }
+
+  worker:
+    command: [python, worker.py]
+    health: { type: log, ready-log: "worker ready", timeout: 30 }
+```
+
+The complete configuration contract is [`schema/lcl.schema.json`](schema/lcl.schema.json). Unknown keys and invalid
+combinations fail during `lcl validate`, before any process or container is started.
+
+## Named stacks and ports
+
+The configured ports are used when available. If one is occupied, the whole stack moves by `ports.step` until every
+declared source port and selected Compose port is free.
+
+```bash
+lcl start -d
+lcl start -d --stack feature-x
+lcl ports --stack feature-x
+lcl urls --stack feature-x
+lcl stop --stack feature-x
+```
+
+Useful policies:
+
+- `--ports configured`: require the configured ports and fail on a collision.
+- `--ports shift`: always start at the first shifted sequence.
+- `--ports offset=2`: force `2 × ports.step`.
+- `ports.skip-configured: true`: make shifted ports the project default.
+
+Variables available in commands, environment, hooks, generated files, and URLs include:
+
+- `${stack}`, `${stack.dir}`, `${root}`, `${project}`, `${offset}`, `${service}`, `${port}`
+- `${port.<service>.<name>}` for source services
+- `${port.<compose-service>.<container-port>}` for Compose services
+- `${env.NAME}` for an environment value supplied to the `lcl` process
+
+Every assigned port is also exported as an uppercase `LCL_PORT_*` environment variable. `lcl ports --env` prints the
+exact variables and resolved URLs for shell use.
+
+## Docker Compose
+
+Compose is optional. When configured, `lcl` asks `docker compose config` for the canonical service and port model,
+creates a per-stack port override, and uses an isolated project name. Containers with health checks wait for
+`healthy`; other containers wait for their published ports.
+
+```yaml
+compose:
+  files: [compose.yml, compose.local.yml]
+  default: [postgres, redis]
+  environment:
+    POSTGRES_TAG: 17-alpine
+```
+
+Use `--infra all`, `--infra postgres,redis`, or `--no-infra` to override the default. `lcl stop --hard` also removes
+volumes belonging to that exact Compose project.
+
+## Commands
+
+```text
+lcl start [service...] [-d] [--build] [--parallel N] [--fail-fast]
+lcl stop [service...] [--hard]
+lcl restart [service...]
+lcl status [--json]
+lcl urls
+lcl ports [--json|--env]
+lcl logs [service...] [-f] [-n N] [--since 10m] [--grep REGEX] [--errors]
+lcl events [-f] [--since 1h] [--service NAME] [--json]
+lcl why SERVICE
+lcl doctor
+lcl validate [--json]
+lcl list
+lcl clean [--all]
+```
+
+`lcl` only signals process groups it launched and can identify. A stale recorded port owned by another process is
+reported, never killed. Foreground programs should not daemonize themselves.
+
+## Development
+
+```bash
+npm install
+npm run check
+npm test
+npm pack --dry-run
+```
+
+CI tests Node.js 22 and 24 on Ubuntu and macOS. Docker-backed Compose tests run on Ubuntu. See
+[`CONTRIBUTING.md`](CONTRIBUTING.md) for the release workflow.
+
+## License
+
+Apache License 2.0.

@@ -1,217 +1,281 @@
-// lcl.yml — the project's stack definition. The tool itself knows nothing about a particular project: every
-// service, port, command, environment variable, generated file, hook and URL comes from this file.
-
+import { Ajv2020, type ErrorObject } from 'ajv/dist/2020.js';
 import { existsSync, readFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
-import { parseYaml, type YamlValue } from './yaml.ts';
-import { die } from './ui.ts';
+import { dirname, resolve } from 'node:path';
+import { parse } from 'yaml';
+import { die } from './ui.js';
 
 export const CONFIG_FILE = 'lcl.yml';
+export const CONFIG_VERSION = 1;
 
-export type ServiceType = 'gradle' | 'maven' | 'npm' | 'exec' | 'container';
-export const SERVICE_TYPES: ServiceType[] = ['gradle', 'maven', 'npm', 'exec', 'container'];
-export type HealthType = 'http' | 'tcp' | 'log' | 'none';
+export type HealthType = 'http' | 'tcp' | 'log' | 'process';
 
 export type Health = {
-    type?: HealthType;    // http (path on the port) | tcp (port accepts connections) | log (ready-log seen) | none (process alive)
-    path?: string;        // HTTP path probed on the service port (implies type http)
-    expect?: string;      // substring the body must contain (e.g. "\"status\":\"UP\"")
-    readyLog?: string;    // regex on the log that also counts as "up" (when the HTTP probe is secured/slow)
-    timeout?: number;     // seconds to wait for the first healthy probe
+    type?: HealthType;
+    port?: string;
+    path?: string;
+    expect?: string;
+    readyLog?: string;
+    timeout?: number;
+};
+
+export type CommandDef = {
+    command?: string[];
+    shell?: string;
+    cwd?: string;
 };
 
 export type ServiceDef = {
-    type: ServiceType;
-    port?: number;
     description?: string;
-    after?: string[];
-    env?: Record<string, string>;
-    health?: Health;
-    // gradle / maven
-    module?: string;
-    task?: string;
-    args?: string[];
-    wrapper?: string;     // ./gradlew | ./mvnw | gradle | mvn
-    // any process type
-    dir?: string;
-    install?: string;     // npm: directory owning node_modules (npm install runs when missing)
+    cwd?: string;
     command?: string[];
-    prep?: Array<{ dir?: string; command: string[] }>;
-    // container
-    compose?: string;
-    containerPort?: number;
+    shell?: string;
+    prepare: CommandDef[];
+    dependsOn: string[];
+    ports: Record<string, number>;
+    environment: Record<string, string>;
+    health?: Health;
 };
 
-export type Hook = { service?: string; when?: string; shell?: string; command?: string[]; dir?: string };
+export type Hook = CommandDef & { service?: string; when?: string };
 
 export type Config = {
+    version: 1;
     file: string;
     root: string;
     name: string;
-    ports: { step: number; skipConfigured: boolean };   // skipConfigured: never use the declared ports, start at +step
-    build?: string[];          // run by `lcl start --build` before anything starts
-    compose?: { file: string; default: string[]; env: Record<string, string> };   // absent: no containers, no Docker needed
-    hosts: string[];             // hostnames expected in /etc/hosts (doctor)
-    env: Record<string, string>;
-    defaults: Partial<Record<ServiceType, Partial<ServiceDef>>>;
+    ports: { step: number; skipConfigured: boolean };
+    build?: string[];
+    compose?: { files: string[]; default: string[]; environment: Record<string, string> };
+    hosts: string[];
+    environment: Record<string, string>;
+    defaults: { environment: Record<string, string>; prepare: CommandDef[]; health?: Health };
     files: Array<{ path: string; template: string }>;
     hooks: { beforeStart: Hook[]; afterUp: Hook[]; afterStop: Hook[] };
     services: Record<string, ServiceDef>;
     urls: Array<{ label: string; url: string }>;
 };
 
+type Raw = Record<string, unknown>;
+
+const sourceSchema = new URL('../schema/lcl.schema.json', import.meta.url);
+const packageSchema = new URL('../../schema/lcl.schema.json', import.meta.url);
+const schema = JSON.parse(readFileSync(existsSync(sourceSchema) ? sourceSchema : packageSchema, 'utf8')) as object;
+const ajv = new Ajv2020({ allErrors: true, strict: true, strictRequired: false, allowUnionTypes: true });
+const validateSchema = ajv.compile(schema);
+
 export function findConfig(from = process.cwd(), explicit?: string): string {
     if (explicit) {
-        const p = resolve(explicit);
-        if (!existsSync(p)) die(`config not found: ${p}`);
-        return p;
+        const path = resolve(explicit);
+        if (!existsSync(path)) die(`config not found: ${path}`);
+        return path;
     }
-    let dir = resolve(from);
+    let directory = resolve(from);
     while (true) {
-        const candidate = join(dir, CONFIG_FILE);
+        const candidate = resolve(directory, CONFIG_FILE);
         if (existsSync(candidate)) return candidate;
-        const parent = dirname(dir);
-        if (parent === dir) die(`no ${CONFIG_FILE} found in ${from} or any parent — run lcl inside a project that has one (or pass --config)`);
-        dir = parent;
+        const parent = dirname(directory);
+        if (parent === directory) die(`no ${CONFIG_FILE} found in ${from} or any parent — run lcl inside a configured project or pass --config`);
+        directory = parent;
     }
 }
 
 export function loadConfig(file: string): Config {
-    const doc = parseYaml(readFileSync(file, 'utf8'));
-    const root = dirname(file);
-    const obj = (v: YamlValue, what: string): Record<string, YamlValue> => {
-        if (v === null || v === undefined) return {};
-        if (typeof v !== 'object' || Array.isArray(v)) die(`${CONFIG_FILE}: ${what} must be a mapping`);
-        return v as Record<string, YamlValue>;
-    };
-    const strList = (v: YamlValue, what: string): string[] => {
-        if (v === null || v === undefined) return [];
-        if (!Array.isArray(v)) die(`${CONFIG_FILE}: ${what} must be a list`);
-        return v.map(String);
-    };
-    const strMap = (v: YamlValue, what: string): Record<string, string> => Object.fromEntries(Object.entries(obj(v, what)).map(([k, x]) => [k, String(x)]));
+    let raw: unknown;
+    try {
+        raw = parse(readFileSync(file, 'utf8'), { merge: true, uniqueKeys: true });
+    } catch (error) {
+        die(`${file}: invalid YAML: ${(error as Error).message}`);
+    }
+    if (!validateSchema(raw)) die(formatValidationErrors(file, validateSchema.errors ?? []));
 
-    const top = obj(doc, 'document');
-    const portsCfg = obj(top.ports, 'ports');
-    const composeCfg = top.compose === undefined || top.compose === null ? null : obj(top.compose, 'compose');
-
+    const top = raw as Raw;
+    const defaultsRaw = asObject(top.defaults);
+    const defaults = {
+        environment: stringMap(defaultsRaw.environment),
+        prepare: commandList(defaultsRaw.prepare),
+        health: health(defaultsRaw.health),
+    };
     const services: Record<string, ServiceDef> = {};
-    for (const [name, raw] of Object.entries(obj(top.services, 'services'))) {
-        const s = obj(raw, `services.${name}`);
-        const type = String(s.type ?? '') as ServiceType;
-        if (!SERVICE_TYPES.includes(type)) die(`${CONFIG_FILE}: services.${name}.type must be ${SERVICE_TYPES.join(' | ')}`);
-        const healthRaw = s.health ? obj(s.health, `services.${name}.health`) : undefined;
+    for (const [name, value] of Object.entries(asObject(top.services))) {
+        const service = asObject(value);
+        const serviceHealth = health(service.health);
         services[name] = {
-            type,
-            port: s.port === undefined || s.port === null ? undefined : Number(s.port),
-            description: s.description === undefined ? undefined : String(s.description),
-            after: strList(s.after, `services.${name}.after`),
-            env: strMap(s.env, `services.${name}.env`),
-            health: healthRaw ? {
-                type: healthRaw.type === undefined ? undefined : String(healthRaw.type) as HealthType,
-                path: healthRaw.path === undefined ? undefined : String(healthRaw.path),
-                expect: healthRaw.expect === undefined ? undefined : String(healthRaw.expect),
-                readyLog: healthRaw['ready-log'] === undefined ? undefined : String(healthRaw['ready-log']),
-                timeout: healthRaw.timeout === undefined ? undefined : Number(healthRaw.timeout),
-            } : undefined,
-            module: s.module === undefined ? undefined : String(s.module),
-            task: s.task === undefined ? undefined : String(s.task),
-            wrapper: s.wrapper === undefined ? undefined : String(s.wrapper),
-            args: s.args === undefined ? undefined : strList(s.args, `services.${name}.args`),
-            dir: s.dir === undefined ? undefined : String(s.dir),
-            install: s.install === undefined ? undefined : String(s.install),
-            command: s.command === undefined ? undefined : strList(s.command, `services.${name}.command`),
-            prep: s.prep === undefined ? undefined : (Array.isArray(s.prep) ? s.prep : []).map((p, i) => {
-                const pp = obj(p, `services.${name}.prep[${i}]`);
-                return { dir: pp.dir === undefined ? undefined : String(pp.dir), command: strList(pp.command, `services.${name}.prep[${i}].command`) };
-            }),
-            compose: s.compose === undefined ? undefined : String(s.compose),
-            containerPort: s['container-port'] === undefined ? undefined : Number(s['container-port']),
+            description: optionalString(service.description),
+            cwd: optionalString(service.cwd),
+            command: stringList(service.command),
+            shell: optionalString(service.shell),
+            prepare: service.prepare === undefined ? defaults.prepare : commandList(service.prepare),
+            dependsOn: stringList(service['depends-on']) ?? [],
+            ports: numberMap(service.ports),
+            environment: { ...defaults.environment, ...stringMap(service.environment) },
+            health: serviceHealth || defaults.health ? { ...(defaults.health ?? {}), ...(serviceHealth ?? {}) } : undefined,
         };
     }
 
-    const defaults: Config['defaults'] = {};
-    for (const [type, raw] of Object.entries(obj(top.defaults, 'defaults'))) {
-        const d = obj(raw, `defaults.${type}`);
-        const h = d.health ? obj(d.health, `defaults.${type}.health`) : undefined;
-        defaults[type as ServiceType] = {
-            args: d.args === undefined ? undefined : strList(d.args, `defaults.${type}.args`),
-            task: d.task === undefined ? undefined : String(d.task),
-            wrapper: d.wrapper === undefined ? undefined : String(d.wrapper),
-            env: strMap(d.env, `defaults.${type}.env`),
-            health: h ? { type: h.type === undefined ? undefined : String(h.type) as HealthType, path: h.path === undefined ? undefined : String(h.path), expect: h.expect === undefined ? undefined : String(h.expect), readyLog: h['ready-log'] === undefined ? undefined : String(h['ready-log']), timeout: h.timeout === undefined ? undefined : Number(h.timeout) } : undefined,
-        };
-    }
-
-    const hooksCfg = obj(top.hooks, 'hooks');
-    const hookList = (key: string, needsService: boolean): Hook[] => (Array.isArray(hooksCfg[key]) ? hooksCfg[key] as YamlValue[] : []).map((h, i) => {
-        const hh = obj(h, `hooks.${key}[${i}]`);
-        if (needsService && !hh.service) die(`${CONFIG_FILE}: hooks.${key}[${i}].service is required`);
-        if (!hh.shell && !hh.command) die(`${CONFIG_FILE}: hooks.${key}[${i}] needs shell or command`);
-        return { service: hh.service === undefined ? undefined : String(hh.service), when: hh.when === undefined ? undefined : String(hh.when), shell: hh.shell === undefined ? undefined : String(hh.shell), command: hh.command === undefined ? undefined : strList(hh.command, 'hook command'), dir: hh.dir === undefined ? undefined : String(hh.dir) };
-    });
-
-    return {
-        file, root,
-        name: String(top.name ?? 'stack'),
-        ports: { step: Number(portsCfg.step ?? 1000), skipConfigured: portsCfg['skip-configured'] === true },
-        build: top.build === undefined ? undefined : strList(top.build, 'build'),
-        compose: composeCfg ? {
-            file: String(composeCfg.file ?? 'docker-compose.yml'),
-            default: strList(composeCfg.default, 'compose.default'),
-            env: strMap(composeCfg.env, 'compose.env'),
+    const composeRaw = top.compose === undefined ? undefined : asObject(top.compose);
+    const hooksRaw = asObject(top.hooks);
+    const config: Config = {
+        version: CONFIG_VERSION,
+        file: resolve(file),
+        root: dirname(resolve(file)),
+        name: String(top.name),
+        ports: {
+            step: Number(asObject(top.ports).step ?? 1000),
+            skipConfigured: asObject(top.ports)['skip-configured'] === true,
+        },
+        build: stringList(top.build),
+        compose: composeRaw ? {
+            files: stringList(composeRaw.files) ?? [],
+            default: stringList(composeRaw.default) ?? [],
+            environment: stringMap(composeRaw.environment),
         } : undefined,
-        hosts: strList(top.hosts, 'hosts'),
-        env: strMap(top.env, 'env'),
+        hosts: stringList(top.hosts) ?? [],
+        environment: stringMap(top.environment),
         defaults,
-        files: (Array.isArray(top.files) ? top.files : []).map((f, i) => { const ff = obj(f, `files[${i}]`); return { path: String(ff.path), template: String(ff.template) }; }),
-        hooks: { beforeStart: hookList('before-start', false), afterUp: hookList('after-up', true), afterStop: hookList('after-stop', false) },
+        files: array(top.files).map((value) => {
+            const entry = asObject(value);
+            return { path: String(entry.path), template: String(entry.template) };
+        }),
+        hooks: {
+            beforeStart: hookList(hooksRaw['before-start']),
+            afterUp: hookList(hooksRaw['after-up']),
+            afterStop: hookList(hooksRaw['after-stop']),
+        },
         services,
-        urls: (Array.isArray(top.urls) ? top.urls : []).map((u, i) => { const uu = obj(u, `urls[${i}]`); return { label: String(uu.label), url: String(uu.url) }; }),
+        urls: array(top.urls).map((value) => {
+            const entry = asObject(value);
+            return { label: String(entry.label), url: String(entry.url) };
+        }),
     };
+    validateSemantics(config);
+    return config;
 }
 
-/** Effective definition: type defaults overlaid by the service's own fields. */
-export function effective(config: Config, name: string): ServiceDef {
-    const def = config.services[name];
-    const d = config.defaults[def.type] ?? {};
-    return {
-        ...d, ...def,
-        env: { ...(d.env ?? {}), ...(def.env ?? {}) },
-        health: def.health || d.health ? { ...(d.health ?? {}), ...(def.health ?? {}) } : undefined,
-        args: def.args ?? d.args,
-        task: def.task ?? d.task,
-        wrapper: def.wrapper ?? d.wrapper,
-    };
+function validateSemantics(config: Config): void {
+    const serviceNames = new Set(Object.keys(config.services));
+    const usedPorts = new Map<number, string>();
+    for (const [name, service] of Object.entries(config.services)) {
+        for (const [portName, port] of Object.entries(service.ports)) {
+            const previous = usedPorts.get(port);
+            if (previous) die(`${CONFIG_FILE}: services.${name}.ports.${portName} duplicates configured port ${port} from ${previous}`);
+            usedPorts.set(port, `${name}.${portName}`);
+        }
+        if (service.health?.type === 'http' || service.health?.type === 'tcp') {
+            const portName = service.health.port ?? primaryPortName(service);
+            if (!portName) die(`${CONFIG_FILE}: services.${name}.health needs a named port`);
+            if (!(portName in service.ports)) die(`${CONFIG_FILE}: services.${name}.health.port references unknown port ${portName}`);
+            service.health.port = portName;
+        }
+        if (service.health?.type === 'log' && !service.health.readyLog) die(`${CONFIG_FILE}: services.${name}.health type log needs ready-log`);
+        if (service.health?.readyLog) {
+            try { new RegExp(service.health.readyLog); } catch (error) { die(`${CONFIG_FILE}: services.${name}.health.ready-log is invalid: ${(error as Error).message}`); }
+        }
+        for (const dependency of service.dependsOn) {
+            if (serviceNames.has(dependency)) continue;
+            if (config.compose) continue;
+            die(`${CONFIG_FILE}: services.${name}.depends-on references unknown service ${dependency}`);
+        }
+    }
+    for (const hook of config.hooks.afterUp) {
+        if (!hook.service || !serviceNames.has(hook.service)) die(`${CONFIG_FILE}: hooks.after-up service must name a source service`);
+    }
 }
 
-// ---- templating -----------------------------------------------------------------------------------------------------
-//   ${stack} ${stack.dir} ${root} ${project} ${offset} ${service} ${port} ${port.<service>} ${port.<compose>:<containerPort>}
-//   ${env.NAME}   and, in template files, {{#each services}} … {{name}} {{port}} … {{/each}}
+export function primaryPortName(service: ServiceDef): string | undefined {
+    if ('http' in service.ports) return 'http';
+    return Object.keys(service.ports)[0];
+}
+
+export function primaryPort(service: ServiceDef): number | undefined {
+    const name = primaryPortName(service);
+    return name ? service.ports[name] : undefined;
+}
 
 export type Vars = Record<string, string>;
 
-export function interpolate(text: string, vars: Vars, where = 'template'): string {
+export function interpolate(text: string, vars: Vars, where = 'value'): string {
     return text.replace(/\$\{([^}]+)\}/g, (whole, key: string) => {
         if (key in vars) return vars[key];
         if (key.startsWith('env.')) return process.env[key.slice(4)] ?? '';
-        die(`${where}: unknown variable ${whole} (known: ${Object.keys(vars).filter((k) => !k.startsWith('port.')).join(', ')}, port.<service>, port.<compose>:<port>)`);
+        die(`${where}: unknown variable ${whole}`);
     });
 }
 
 export function renderTemplate(text: string, vars: Vars, services: Array<{ name: string; port: number }>, where: string): string {
     const expanded = text.replace(/\{\{#each services\}\}([\s\S]*?)\{\{\/each\}\}/g, (_, body: string) =>
-        services.map((s, i) => body.replace(/\{\{(name|port|index|last)\}\}/g, (__, k: string) => k === 'name' ? s.name : k === 'port' ? String(s.port) : k === 'index' ? String(i) : String(i === services.length - 1))
-            .replace(/\{\{#unless last\}\}([\s\S]*?)\{\{\/unless\}\}/g, (___, inner: string) => (i === services.length - 1 ? '' : inner))).join(''));
+        services.map((service, index) => body
+            .replace(/\{\{(name|port|index|last)\}\}/g, (__, key: string) => key === 'name' ? service.name : key === 'port' ? String(service.port) : key === 'index' ? String(index) : String(index === services.length - 1))
+            .replace(/\{\{#unless last\}\}([\s\S]*?)\{\{\/unless\}\}/g, (__, inner: string) => index === services.length - 1 ? '' : inner)).join(''));
     return interpolate(expanded, vars, where);
 }
 
-/** `when:` expressions: two interpolated operands compared with == or != (e.g. "${offset} != 0"). Empty = true. */
-export function evaluateWhen(expr: string | undefined, vars: Vars): boolean {
-    if (!expr) return true;
-    const text = interpolate(expr, vars, 'when');
-    const m = /^\s*(.*?)\s*(==|!=)\s*(.*?)\s*$/.exec(text);
-    if (!m) die(`when: cannot evaluate "${expr}" (use <a> == <b> or <a> != <b>)`);
-    const eq = m[1] === m[3];
-    return m[2] === '==' ? eq : !eq;
+export function evaluateWhen(expression: string | undefined, vars: Vars): boolean {
+    if (!expression) return true;
+    const text = interpolate(expression, vars, 'when');
+    const match = /^\s*(.*?)\s*(==|!=)\s*(.*?)\s*$/.exec(text);
+    if (!match) die(`when: cannot evaluate "${expression}"; use <a> == <b> or <a> != <b>`);
+    const equal = match[1] === match[3];
+    return match[2] === '==' ? equal : !equal;
+}
+
+function formatValidationErrors(file: string, errors: ErrorObject[]): string {
+    if (errors.some((error) => error.instancePath === '/version' || error.params.missingProperty === 'version')) {
+        return `${file}: unsupported legacy configuration; schema v1 requires \`version: 1\` and generic command services`;
+    }
+    const details = errors.slice(0, 12).map((error) => `${error.instancePath || '/'} ${error.message ?? 'is invalid'}`).join('\n  - ');
+    return `${file}: configuration does not match schema v1:\n  - ${details}`;
+}
+
+function asObject(value: unknown): Raw {
+    return value && typeof value === 'object' && !Array.isArray(value) ? value as Raw : {};
+}
+
+function array(value: unknown): unknown[] {
+    return Array.isArray(value) ? value : [];
+}
+
+function optionalString(value: unknown): string | undefined {
+    return value === undefined ? undefined : String(value);
+}
+
+function stringList(value: unknown): string[] | undefined {
+    return value === undefined ? undefined : array(value).map(String);
+}
+
+function stringMap(value: unknown): Record<string, string> {
+    return Object.fromEntries(Object.entries(asObject(value)).map(([key, entry]) => [key, String(entry)]));
+}
+
+function numberMap(value: unknown): Record<string, number> {
+    return Object.fromEntries(Object.entries(asObject(value)).map(([key, entry]) => [key, Number(entry)]));
+}
+
+function command(value: unknown): CommandDef {
+    if (Array.isArray(value)) return { command: value.map(String) };
+    const raw = asObject(value);
+    return { command: stringList(raw.command), shell: optionalString(raw.shell), cwd: optionalString(raw.cwd) };
+}
+
+function commandList(value: unknown): CommandDef[] {
+    return array(value).map(command);
+}
+
+function health(value: unknown): Health | undefined {
+    if (value === undefined) return undefined;
+    const raw = asObject(value);
+    return {
+        type: optionalString(raw.type) as HealthType | undefined,
+        port: optionalString(raw.port),
+        path: optionalString(raw.path),
+        expect: optionalString(raw.expect),
+        readyLog: optionalString(raw['ready-log']),
+        timeout: raw.timeout === undefined ? undefined : Number(raw.timeout),
+    };
+}
+
+function hookList(value: unknown): Hook[] {
+    return array(value).map((entry) => {
+        const raw = asObject(entry);
+        return { ...command(raw), service: optionalString(raw.service), when: optionalString(raw.when) };
+    });
 }

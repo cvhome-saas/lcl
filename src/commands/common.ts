@@ -1,9 +1,9 @@
 // What every command needs: the checkout root, the catalog, the stack's paths and its recorded state.
 
-import { loadCatalog, resolveServiceName, type Catalog } from '../catalog.ts';
-import { request, supervisorReachable } from '../control.ts';
-import { findRoot, loadState, paths, pidAlive, registryKey, stackName, type Paths, type State } from '../instance.ts';
-import { die } from '../ui.ts';
+import { loadCatalog, resolveServiceName, type Catalog } from '../catalog.js';
+import { request, supervisorReachable } from '../control.js';
+import { findRoot, loadState, paths, pidAlive, registryKey, stackName, type Paths, type State } from '../instance.js';
+import { die } from '../ui.js';
 
 export type Context = { root: string; configFile: string; id: string; key: string; catalog: Catalog; paths: Paths; state: State | null };
 

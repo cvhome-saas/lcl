@@ -1,12 +1,13 @@
-// Stack identity (`--stack`, default `default`), per-stack paths under build/lcl/<stack>/, the state file and the
+// Stack identity (`--stack`, default `default`), per-stack paths under .lcl/<stack>/, the state file and the
 // global registry of running stacks.
 
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, renameSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { die } from './ui.ts';
-import { findConfig } from './config.ts';
+import { die } from './ui.js';
+import { findConfig } from './config.js';
+import { CONTROL_PROTOCOL_VERSION, STATE_VERSION, VERSION } from './version.js';
 
 export function findRoot(from = process.cwd(), explicitConfig?: string): { root: string; configFile: string } {
     const configFile = findConfig(from, explicitConfig);
@@ -18,6 +19,7 @@ export type ServiceState = 'starting' | 'up' | 'degraded' | 'down' | 'crashed' |
 export type ServiceRecord = {
     state: ServiceState;
     pid?: number;
+    processFingerprint?: string;
     port: number;
     startedAt?: string;
     exitCode?: number | null;
@@ -43,12 +45,16 @@ export type StartOptions = {
 };
 
 export type State = {
+    stateVersion: number;
+    protocolVersion: number;
+    cliVersion: string;
     id: string;                // stack name
     configFile: string;
     key: string;               // registry key: stack name + checkout, unique across checkouts
     root: string;
     project: string;           // docker compose project name
     supervisorPid?: number;
+    supervisorFingerprint?: string;
     startedAt?: string;
     ports: PortMap;
     options: StartOptions;
@@ -75,8 +81,15 @@ export function registryKey(root: string, stack: string): string {
     return `${stack}@${createHash('sha1').update(root).digest('hex').slice(0, 8)}`;
 }
 
+/** A Compose-safe project name that cannot collide with the same stack in another checkout. */
+export function composeProjectName(name: string, stack: string, root: string): string {
+    const slug = `${name}-${stack}`.toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '') || 'stack';
+    const checkout = createHash('sha1').update(root).digest('hex').slice(0, 8);
+    return `lcl-${slug.slice(0, 48)}-${checkout}`;
+}
+
 export function paths(root: string, stack: string): Paths {
-    const dir = join(root, 'build', 'lcl', stack);
+    const dir = join(root, '.lcl', stack);
     return {
         root, dir,
         logs: join(dir, 'logs'),
@@ -93,7 +106,14 @@ export function paths(root: string, stack: string): Paths {
 
 export function loadState(p: Paths): State | null {
     if (!existsSync(p.state)) return null;
-    try { return JSON.parse(readFileSync(p.state, 'utf8')) as State; } catch { return null; }
+    try {
+        const state = JSON.parse(readFileSync(p.state, 'utf8')) as State;
+        if (state.stateVersion !== STATE_VERSION) die(`state in ${p.dir} uses unsupported format ${state.stateVersion ?? 'legacy'}; stop the old stack and remove that directory`);
+        return state;
+    } catch (error) {
+        if (error instanceof Error && error.message.includes('unsupported format')) throw error;
+        return null;
+    }
 }
 
 export function saveState(p: Paths, state: State): void {
@@ -113,16 +133,22 @@ export function pidAlive(pid?: number): boolean {
 export const REGISTRY_DIR = join(process.env.LCL_HOME ?? join(homedir(), '.lcl'), 'instances');
 
 export type RegistryEntry = {
-    id: string; key: string; root: string; project: string; supervisorPid?: number; startedAt?: string; ports: PortMap; updatedAt: string;
+    id: string; key: string; root: string; project: string; supervisorPid?: number; startedAt?: string; ports: PortMap;
+    cliVersion?: string; protocolVersion?: number; updatedAt: string;
 };
 
 export function registerInstance(state: State): void {
     mkdirSync(REGISTRY_DIR, { recursive: true });
     const entry: RegistryEntry = {
         id: state.id, key: state.key, root: state.root, project: state.project, supervisorPid: state.supervisorPid,
-        startedAt: state.startedAt, ports: state.ports, updatedAt: new Date().toISOString(),
+        startedAt: state.startedAt, ports: state.ports, cliVersion: state.cliVersion, protocolVersion: state.protocolVersion,
+        updatedAt: new Date().toISOString(),
     };
     writeFileSync(join(REGISTRY_DIR, `${state.key}.json`), JSON.stringify(entry, null, 2));
+}
+
+export function newStateIdentity(): Pick<State, 'stateVersion' | 'protocolVersion' | 'cliVersion'> {
+    return { stateVersion: STATE_VERSION, protocolVersion: CONTROL_PROTOCOL_VERSION, cliVersion: VERSION };
 }
 
 export function unregisterInstance(key: string): void {

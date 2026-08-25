@@ -1,16 +1,18 @@
 // lcl — run one or several independent local stacks side by side (`--stack <name>`, default `default`).
 
 import { parseArgs } from 'node:util';
-import { loadCatalog } from './catalog.ts';
-import { paths, type State } from './instance.ts';
-import { Supervisor } from './supervisor.ts';
-import { CliError, fail } from './ui.ts';
-import { context } from './commands/common.ts';
-import { start } from './commands/start.ts';
-import { restart, stop } from './commands/stop.ts';
-import { printList, printPorts, printStatus, printUrls } from './commands/status.ts';
-import { clean, events, logs, why } from './commands/logs.ts';
-import { doctor } from './commands/doctor.ts';
+import { loadCatalog } from './catalog.js';
+import { paths, type State } from './instance.js';
+import { Supervisor } from './supervisor.js';
+import { CliError, fail } from './ui.js';
+import { context } from './commands/common.js';
+import { start } from './commands/start.js';
+import { restart, stop } from './commands/stop.js';
+import { printList, printPorts, printStatus, printUrls } from './commands/status.js';
+import { clean, events, logs, why } from './commands/logs.js';
+import { doctor } from './commands/doctor.js';
+import { init } from './commands/init.js';
+import { VERSION } from './version.js';
 
 const HELP = `lcl — local stack runner. Several stacks can run at once: --stack <name> (default: default)
 
@@ -21,17 +23,20 @@ const HELP = `lcl — local stack runner. Several stacks can run at once: --stac
   lcl status [--json]               services, state, ports, pids, uptime, error counts, health
   lcl urls | lcl ports [--json|--env]
   lcl logs [svc…] [-f] [-n N] [--since 10m] [--grep RE] [--errors]
-  lcl events [-f] [--since 1h] [--service svc] [--json]   audit trail (build/lcl/events.jsonl)
+  lcl events [-f] [--since 1h] [--service svc] [--json]   audit trail (.lcl/<stack>/events.jsonl)
   lcl why <svc>                     exit code, health, port owner, command, env, last errors
-  lcl doctor                        docker, PATH tools, /etc/hosts, node_modules, ports, registry
+  lcl doctor                        Docker, PATH tools, /etc/hosts, working directories, ports, registry
   lcl list                          every running stack
-  lcl clean [--all]                 remove build/lcl/<stack> of a stopped stack
+  lcl clean [--all]                 remove .lcl/<stack> state for stopped stacks
+  lcl validate [--json]             validate lcl.yml and print the resolved catalog
+  lcl init [--template empty|node|python|java|compose] [--force]
+  lcl --version
 
-The project is described by lcl.yml (found upwards from the cwd, or --config <file>): services, runner type, ports,
+The project is described by lcl.yml (found upwards from the cwd, or --config <file>): services, commands, ports,
 env, generated files, hooks, urls. If any configured port is taken, the whole stack shifts to the next free +step sequence;
 --ports shift / --no-default-ports never uses the configured ports (lcl.yml ports.skip-configured: true makes that the default).
 Every command acts on one stack: --stack xxx (or LCL_STACK=xxx) selects it, 'default' is used otherwise. Each stack
-has its own supervisor, services, compose project (lcl-<stack>), ports, logs and audit trail (build/lcl/<stack>/).
+has its own supervisor, services, checkout-scoped Compose project, ports, logs and audit trail (.lcl/<stack>/).
 
   lcl start -d                      the default stack
   lcl start -d --stack xxx          a second stack next to it (ports shift to the next free +1000 sequence)
@@ -44,6 +49,7 @@ async function main(argv: string[]): Promise<void> {
         strict: true,
         options: {
             help: { type: 'boolean', short: 'h' },
+            version: { type: 'boolean', short: 'v' },
             stack: { type: 'string', short: 's' },
             instance: { type: 'string' },   // old spelling of --stack
             root: { type: 'string' },
@@ -71,10 +77,13 @@ async function main(argv: string[]): Promise<void> {
             all: { type: 'boolean' },
             state: { type: 'string' },
             list: { type: 'boolean' },
+            template: { type: 'string' },
+            force: { type: 'boolean' },
         },
     });
     const [command = 'start', ...rest] = positionals;
     if (values.help) { console.log(HELP); return; }
+    if (values.version) { console.log(VERSION); return; }
 
     if (command === '__supervise') {
         const state = JSON.parse(values.state ?? '') as State;
@@ -82,6 +91,8 @@ async function main(argv: string[]): Promise<void> {
         await supervisor.run();
         return;
     }
+
+    if (command === 'init') { init(values.root ?? process.cwd(), values.template ?? 'empty', Boolean(values.force)); return; }
 
     const ctx = context({ stack: values.stack ?? values.instance, root: values.root, config: values.config });
     const startFlags = {
@@ -104,6 +115,10 @@ async function main(argv: string[]): Promise<void> {
         case 'events': return events(ctx, { follow: Boolean(values.follow), since: values.since, service: values.service, json: Boolean(values.json) });
         case 'why': if (!rest[0]) throw new CliError('usage: lcl why <service>', 2); return why(ctx, rest[0]);
         case 'doctor': return doctor(ctx);
+        case 'validate':
+            if (values.json) console.log(JSON.stringify({ version: ctx.catalog.config.version, services: ctx.catalog.services.map((service) => service.name), compose: ctx.catalog.composeServices }, null, 2));
+            else console.log(`valid schema v${ctx.catalog.config.version}: ${ctx.catalog.services.length} source service(s), ${ctx.catalog.composeServices.length} Compose service(s)`);
+            return;
         case 'list': printList(); return;
         case 'clean': clean(ctx, Boolean(values.all)); return;
         case 'help': console.log(HELP); return;

@@ -2,20 +2,20 @@
 // watches their logs and health, records state and events, and answers CLI commands over the control socket.
 // Everything project-specific (what to run, how, env, health, hooks) comes from lcl.yml via the catalog.
 
-import { existsSync, mkdirSync, rmSync } from 'node:fs';
+import { mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Socket } from 'node:net';
-import type { Catalog, Service } from './catalog.ts';
-import { Compose } from './compose.ts';
-import { evaluateWhen, interpolate, renderTemplate, type Hook, type Vars } from './config.ts';
-import { progress, serve, type Request } from './control.ts';
-import { EventLog } from './events.ts';
-import { httpAlive, httpProbe, tcpOpen } from './health.ts';
-import { pidAlive, registerInstance, saveState, unregisterInstance, type Paths, type ServiceRecord, type State, type StartOptions } from './instance.ts';
-import { LogWatcher } from './logs.ts';
-import { freePort, killTree, onSignals, spawnLogged, type Spawned } from './proc.ts';
-import { envName, renderComposeEnv, renderComposeOverride, renderFiles, serviceList, urlsFor, variables, writeFile } from './render.ts';
-import { dim, fmtDuration, green, red, say, sleep, warn, yellow } from './ui.ts';
+import type { Catalog, Service } from './catalog.js';
+import { Compose } from './compose.js';
+import { evaluateWhen, interpolate, renderTemplate, type Hook, type Vars } from './config.js';
+import { progress, serve, type Request } from './control.js';
+import { EventLog } from './events.js';
+import { httpAlive, httpProbe, tcpOpen } from './health.js';
+import { pidAlive, registerInstance, saveState, unregisterInstance, type Paths, type ServiceRecord, type State, type StartOptions } from './instance.js';
+import { LogWatcher } from './logs.js';
+import { killTree, onSignals, processFingerprint, spawnLogged, type Spawned } from './proc.js';
+import { envName, renderComposeEnv, renderComposeOverride, renderFiles, serviceList, urlsFor, variables, writeFile } from './render.js';
+import { dim, fmtDuration, green, red, say, sleep, warn, yellow } from './ui.js';
 
 type Runtime = {
     service: Service;
@@ -52,7 +52,7 @@ export class Supervisor {
                 console.log(`    ${colour(e.event.padEnd(18))} ${(e.service ?? '').padEnd(18)} ${e.message ?? ''}`);
             }
         });
-        this.compose = catalog.config.compose ? new Compose(catalog.root, state.project, paths.composeEnv, paths.composeOverride, join(paths.logs, 'compose.log'), catalog.config.compose.file) : null;
+        this.compose = catalog.config.compose ? new Compose(catalog.root, state.project, paths.composeEnv, paths.composeOverride, join(paths.logs, 'compose.log'), catalog.config.compose.files) : null;
     }
 
     get options(): StartOptions { return this.state.options; }
@@ -63,6 +63,7 @@ export class Supervisor {
     async run(): Promise<never> {
         mkdirSync(this.paths.logs, { recursive: true });
         this.state.supervisorPid = process.pid;
+        this.state.supervisorFingerprint = processFingerprint(process.pid);
         this.state.startedAt = new Date().toISOString();
         this.persist();
         registerInstance(this.state);
@@ -114,7 +115,7 @@ export class Supervisor {
             this.state.infraUp = true;
             this.persist();
             this.events.emit('infra.up', { message: this.options.infra.join(' ') });
-            await this.waitForContainers();
+            await this.waitForContainers(this.options.infra);
         }
         await this.runHooks(this.catalog.config.hooks.beforeStart, 'before-start');
 
@@ -131,15 +132,16 @@ export class Supervisor {
      * Containers with a HEALTHCHECK are waited for until `healthy` (what compose ps reports); the others until every
      * published port accepts a connection.
      */
-    private async waitForContainers(): Promise<void> {
+    private async waitForContainers(names: string[]): Promise<void> {
         const compose = this.compose!;
         const deadline = Date.now() + 120_000;
-        const pending = new Set(this.options.infra);
+        const pending = new Set(names);
         while (pending.size && Date.now() < deadline) {
             const status = compose.status();
             for (const svc of [...pending]) {
                 const st = status.get(svc);
-                if (st?.state === 'exited' || st?.state === 'dead') { warn(`container ${svc} ${st.state}`); pending.delete(svc); continue; }
+                if (st?.state === 'exited' || st?.state === 'dead') throw new Error(`container ${svc} ${st.state}`);
+                if (!st || st.state !== 'running') continue;
                 if (st?.health === 'healthy') { this.events.emit('infra.ready', { service: svc, message: 'healthy' }); pending.delete(svc); continue; }
                 if (st?.health === 'starting' || st?.health === 'unhealthy') continue;
                 const ports = this.catalog.infra.filter((i) => i.compose === svc).map((i) => this.state.ports.infra[i.key]);
@@ -148,7 +150,7 @@ export class Supervisor {
             }
             if (pending.size) await sleep(1000);
         }
-        for (const svc of pending) warn(`container ${svc} is not ready after 120s — services may fail to start`);
+        if (pending.size) throw new Error(`container(s) not ready after 120s: ${[...pending].join(', ')}`);
     }
 
     private async startBatch(services: Service[]): Promise<void> {
@@ -162,6 +164,16 @@ export class Supervisor {
 
     // ---- services -----------------------------------------------------------------------------------------------
 
+    private servicePorts(service: Service): number[] {
+        return Object.keys(service.ports).map((name) => this.state.ports.services[`${service.name}.${name}`]);
+    }
+
+    private healthPort(service: Service): number {
+        const configured = service.def.health?.port;
+        const name = configured ?? ('http' in service.ports ? 'http' : Object.keys(service.ports)[0]);
+        return name ? this.state.ports.services[`${service.name}.${name}`] : 0;
+    }
+
     private runtime(name: string): Runtime {
         let rt = this.runtimes.get(name);
         if (!rt) {
@@ -170,7 +182,7 @@ export class Supervisor {
             const logFile = join(this.paths.logs, `${name}.log`);
             rt = {
                 service,
-                record: { state: 'down', port: this.state.ports.services[name] ?? 0, errors: 0, logFile },
+                record: { state: 'down', port: this.healthPort(service), errors: 0, logFile },
                 watcher: new LogWatcher(logFile),
                 readyLog: service.def.health?.readyLog ? new RegExp(service.def.health.readyLog) : undefined,
                 restarts: 0, stopping: false, lastProbe: 0,
@@ -187,10 +199,23 @@ export class Supervisor {
         const { service, record } = rt;
         const def = service.def;
         const port = record.port;
-
-        if (port && (await tcpOpen(port))) {
+        const unavailable = def.dependsOn.filter((dependency) => {
+            if (!this.catalog.services.some((candidate) => candidate.name === dependency)) return false;
+            return this.state.services[dependency]?.state !== 'up';
+        });
+        if (unavailable.length) {
             record.state = 'down';
-            record.health = `:${port} already in use by another process`;
+            record.health = `blocked by dependency: ${unavailable.join(', ')}`;
+            this.events.emit('service.blocked', { service: name, message: record.health });
+            this.persist();
+            return record;
+        }
+
+        const occupied: number[] = [];
+        for (const portNumber of this.servicePorts(service)) if (await tcpOpen(portNumber)) occupied.push(portNumber);
+        if (occupied.length) {
+            record.state = 'down';
+            record.health = `port(s) ${occupied.map((value) => `:${value}`).join(', ')} already in use by another process`;
             this.events.emit('service.skipped', { service: name, message: record.health });
             this.persist();
             return record;
@@ -208,34 +233,33 @@ export class Supervisor {
         const vars = this.vars(name);
         const env = this.serviceEnv(name);
         const t = (s: string) => interpolate(s, vars, `services.${name}`);
-        const cwd = join(this.catalog.root, def.dir ?? '.');
-        if (def.type === 'npm') {
-            const installDir = join(this.catalog.root, def.install ?? def.dir ?? '.');
-            if (!existsSync(join(installDir, 'node_modules'))) {
-                this.events.emit('service.install', { service: name, message: `npm install in ${def.install ?? def.dir ?? '.'}` });
-                const code = await this.runToCompletion(['npm', 'install'], installDir, join(this.paths.logs, `${name}-install.log`));
-                if (code !== 0) return this.failed(rt, `npm install failed — see ${join(this.paths.logs, `${name}-install.log`)}`);
-            }
-        }
-        for (const [i, prep] of (def.prep ?? []).entries()) {
+        const cwd = join(this.catalog.root, def.cwd ?? '.');
+        for (const [i, prep] of def.prepare.entries()) {
             const prepLog = join(this.paths.logs, `${name}-prep.log`);
             if (i === 0) rmSync(prepLog, { force: true });
-            const cmd = prep.command.map(t);
+            const cmd = prep.shell ? ['sh', '-c', t(prep.shell)] : (prep.command ?? []).map(t);
             progress(sock!, `${name}: ${cmd.join(' ')}`);
-            const code = await this.runToCompletion(cmd, join(this.catalog.root, prep.dir ?? def.dir ?? '.'), prepLog, true, env);
+            let code: number;
+            try {
+                code = await this.runToCompletion(cmd, join(this.catalog.root, prep.cwd ?? def.cwd ?? '.'), prepLog, true, env);
+            } catch (error) {
+                return this.failed(rt, `${cmd.join(' ')} could not start: ${(error as Error).message}`);
+            }
             if (code !== 0) return this.failed(rt, `${cmd.join(' ')} failed — see ${prepLog}`);
         }
-        let command: string[];
-        if (def.type === 'gradle') command = [def.wrapper ?? './gradlew', `${def.module}:${def.task ?? 'bootRun'}`, ...(def.args ?? []).map(t)];
-        else if (def.type === 'maven') command = [def.wrapper ?? './mvnw', '-pl', def.module!, def.task ?? 'spring-boot:run', ...(def.args ?? []).map(t)];
-        else command = (def.command ?? []).map(t);
-        if (port) env.PORT = String(port);
+        const command = def.shell ? ['sh', '-c', t(def.shell)] : (def.command ?? []).map(t);
         record.command = command;
         record.cwd = cwd;
 
-        const spawned = spawnLogged(command, { cwd, env, logFile: record.logFile });
+        let spawned: Spawned;
+        try {
+            spawned = spawnLogged(command, { cwd, env, logFile: record.logFile });
+        } catch (error) {
+            return this.failed(rt, `${command.join(' ')} could not start: ${(error as Error).message}`);
+        }
         rt.proc = spawned;
         record.pid = spawned.pid;
+        record.processFingerprint = spawned.fingerprint;
         this.persist();
         spawned.child.on('exit', (code, signal) => this.onExit(rt, spawned, code, signal));
 
@@ -248,7 +272,7 @@ export class Supervisor {
             if (rt.proc !== spawned || rt.record.state === 'crashed' || rt.record.state === 'stopped') return record;
             const listening = kind === 'http' || kind === 'tcp' ? await tcpOpen(port) : true;
             if (listening) {
-                const probe = kind === 'none' ? { ok: Date.now() - Date.parse(record.startedAt!) > 2000, reason: 'process alive' } : await this.probe(rt);
+                const probe = kind === 'process' ? { ok: Date.now() - Date.parse(record.startedAt!) > 2000, reason: 'process alive' } : await this.probe(rt);
                 const readyByLog = rt.readyLog ? rt.watcher.lastLines.some((l) => rt.readyLog!.test(l)) || rt.watcher.started : false;
                 if (probe.ok || readyByLog) {
                     record.state = 'up';
@@ -270,12 +294,12 @@ export class Supervisor {
         return record;
     }
 
-    /** http when a path is given (or asked for), log when only a ready-log exists, none without a port, else tcp. */
-    private healthType(rt: Runtime): 'http' | 'tcp' | 'log' | 'none' {
+    /** HTTP when a path is configured, otherwise TCP for a port and process-alive for a worker. */
+    private healthType(rt: Runtime): 'http' | 'tcp' | 'log' | 'process' {
         const h = rt.service.def.health;
         if (h?.type) return h.type;
         if (h?.path) return 'http';
-        if (rt.service.port === undefined) return h?.readyLog ? 'log' : 'none';
+        if (rt.service.port === undefined) return h?.readyLog ? 'log' : 'process';
         return 'tcp';
     }
 
@@ -304,10 +328,11 @@ export class Supervisor {
         for (const [n, port] of Object.entries(this.state.ports.services)) env[envName(n)] = String(port);
         for (const i of this.catalog.infra) env[i.envVar] = String(this.state.ports.infra[i.key]);
         const list = serviceList(this.catalog, this.state.ports);
-        for (const [k, v] of Object.entries(this.catalog.config.env)) env[k] = renderTemplate(v, vars, list, `env.${k}`);
+        for (const service of list) env[envName(service.name)] = String(service.port);
+        for (const [k, v] of Object.entries(this.catalog.config.environment)) env[k] = renderTemplate(v, vars, list, `environment.${k}`);
         if (name) {
             const def = this.catalog.services.find((s) => s.name === name)?.def;
-            for (const [k, v] of Object.entries(def?.env ?? {})) env[k] = renderTemplate(v, vars, list, `services.${name}.env.${k}`);
+            for (const [k, v] of Object.entries(def?.environment ?? {})) env[k] = renderTemplate(v, vars, list, `services.${name}.environment.${k}`);
         }
         return env;
     }
@@ -319,7 +344,7 @@ export class Supervisor {
             if (!evaluateWhen(hook.when, vars)) { this.events.emit('hook.skipped', { service: name, message: `${phase}: ${hook.when}` }); continue; }
             const cmd = hook.shell ? ['sh', '-c', interpolate(hook.shell, vars, where)] : (hook.command ?? []).map((c) => interpolate(c, vars, where));
             const log = join(this.paths.logs, `${name ?? phase}-hook.log`);
-            const code = await this.runToCompletion(cmd, join(this.catalog.root, hook.dir ?? '.'), log, true, this.serviceEnv(name));
+            const code = await this.runToCompletion(cmd, join(this.catalog.root, hook.cwd ?? '.'), log, true, this.serviceEnv(name));
             const shown = (hook.shell ? cmd[2] : cmd.join(' ')).replace(/\s+/g, ' ').slice(0, 100);
             this.events.emit(code === 0 ? 'hook.done' : 'hook.failed', { service: name, message: `${phase}: ${shown}${code === 0 ? '' : ` → exit ${code}, see ${log}`}` });
         }
@@ -331,6 +356,7 @@ export class Supervisor {
         rt.record.exitCode = code;
         rt.record.signal = signal;
         rt.record.pid = undefined;
+        rt.record.processFingerprint = undefined;
         rt.record.errors = rt.watcher.errors;
         rt.proc = undefined;
         if (rt.stopping || this.phase === 'stopping') {
@@ -365,10 +391,9 @@ export class Supervisor {
             this.events.emit('service.stopping', { service: name, message: `pid ${rt.proc.pid}` });
             await killTree(rt.proc.pid);
         }
-        const swept = rt.record.port ? await freePort(rt.record.port) : [];
-        if (swept.length) this.events.emit('service.swept', { service: name, message: `killed listeners ${swept.join(',')} on :${rt.record.port}` });
         rt.proc = undefined;
         rt.record.pid = undefined;
+        rt.record.processFingerprint = undefined;
         rt.record.state = 'stopped';
         this.persist();
         return rt.record;
@@ -391,7 +416,7 @@ export class Supervisor {
                 rt.watcher.poll();
                 if (rt.record.errors !== rt.watcher.errors) { rt.record.errors = rt.watcher.errors; changed = true; }
                 if (!rt.proc || (rt.record.state !== 'up' && rt.record.state !== 'degraded')) continue;
-                if (this.healthType(rt) === 'none' || this.healthType(rt) === 'log') continue;
+                if (this.healthType(rt) === 'process' || this.healthType(rt) === 'log') continue;
                 if (Date.now() - rt.lastProbe < HEALTH_INTERVAL) continue;
                 rt.lastProbe = Date.now();
                 const probe = await this.probe(rt);
@@ -426,6 +451,7 @@ export class Supervisor {
                 this.state.infraUp = false;
             }
             this.state.supervisorPid = undefined;
+            this.state.supervisorFingerprint = undefined;
             this.persist();
             unregisterInstance(this.state.key);
             this.events.emit('instance.stopped');
@@ -443,7 +469,24 @@ export class Supervisor {
         switch (req.cmd) {
             case 'ping': return 'pong';
             case 'status': return this.snapshot();
-            case 'start': { const out: ServiceRecord[] = []; for (const n of names) out.push(await this.startService(n, sock)); this.events.emit('command.start', { message: names.join(' ') }); return out; }
+            case 'start': {
+                const infra = (req.args?.infra as string[] | undefined) ?? [];
+                if (infra.length && this.compose) {
+                    this.render();
+                    const missing = infra.filter((name) => !this.compose!.running().includes(name));
+                    if (missing.length) {
+                        const result = await this.compose.up(missing);
+                        if (result.code !== 0) throw new Error(`docker compose up failed: ${result.out.trim().split('\n').at(-1)}`);
+                        this.ownsInfra = true;
+                        this.state.infraUp = true;
+                        await this.waitForContainers(missing);
+                    }
+                }
+                const out: ServiceRecord[] = [];
+                for (const n of names) out.push(await this.startService(n, sock));
+                this.events.emit('command.start', { message: names.join(' ') });
+                return out;
+            }
             case 'stop': { const out: ServiceRecord[] = []; for (const n of names) out.push(await this.stopService(n, sock)); this.events.emit('command.stop', { message: names.join(' ') }); return out; }
             case 'restart': { const out: ServiceRecord[] = []; for (const n of names) out.push(await this.restartService(n, sock)); this.events.emit('command.restart', { message: names.join(' ') }); return out; }
             case 'why': return this.why(String(req.args?.service));

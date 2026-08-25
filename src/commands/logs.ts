@@ -1,12 +1,12 @@
 import { existsSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { followEvents, formatEvent, readEvents } from '../events.ts';
-import { listInstances, pidAlive, type ServiceRecord } from '../instance.ts';
-import { ERROR_RE, followFiles, tailFile } from '../logs.ts';
-import { listenersOnPort } from '../ports.ts';
-import { descendants } from '../proc.ts';
-import { bold, die, dim, parseDuration, red, yellow } from '../ui.ts';
-import { control, liveSupervisor, resolveServices, type Context } from './common.ts';
+import { followEvents, formatEvent, readEvents } from '../events.js';
+import { listInstances, pidAlive, unregisterInstance, type ServiceRecord } from '../instance.js';
+import { ERROR_RE, followFiles, tailFile } from '../logs.js';
+import { listenersOnPort } from '../ports.js';
+import { descendants } from '../proc.js';
+import { bold, die, dim, parseDuration, red, yellow } from '../ui.js';
+import { control, liveSupervisor, resolveServices, type Context } from './common.js';
 
 export async function logs(ctx: Context, names: string[], flags: { follow: boolean; since?: string; grep?: string; errors: boolean; lines: number }): Promise<void> {
     const services = resolveServices(ctx, names);
@@ -98,9 +98,23 @@ export async function why(ctx: Context, name: string): Promise<void> {
 
 export function clean(ctx: Context, all: boolean): void {
     if (ctx.state?.supervisorPid && pidAlive(ctx.state.supervisorPid)) die(`stack ${ctx.id} is running — stop it first`);
-    rmSync(ctx.paths.dir, { recursive: true, force: true });
-    console.log(`removed ${ctx.paths.dir}`);
+    removeStateDirectory(ctx.paths.dir, ctx.key);
     if (all) {
-        for (const inst of listInstances()) if (!inst.alive && inst.key !== ctx.key) { rmSync(join(inst.root, 'build', 'lcl', inst.id), { recursive: true, force: true }); console.log(`removed ${join(inst.root, 'build', 'lcl', inst.id)}`); }
+        for (const instance of listInstances()) {
+            if (instance.alive || instance.key === ctx.key) continue;
+            removeStateDirectory(join(instance.root, '.lcl', instance.id), instance.key);
+        }
     }
+}
+
+function removeStateDirectory(directory: string, expectedKey: string): void {
+    const stateFile = join(directory, 'state.json');
+    if (!existsSync(directory)) { console.log(`nothing to clean in ${directory}`); return; }
+    if (!existsSync(stateFile)) die(`refusing to remove ${directory}: no lcl state sentinel`);
+    let key = '';
+    try { key = String((JSON.parse(readFileSync(stateFile, 'utf8')) as { key?: string }).key ?? ''); } catch { /* rejected below */ }
+    if (key !== expectedKey) die(`refusing to remove ${directory}: state sentinel belongs to another stack`);
+    rmSync(directory, { recursive: true, force: true });
+    unregisterInstance(expectedKey);
+    console.log(`removed ${directory}`);
 }

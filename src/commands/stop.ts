@@ -1,11 +1,11 @@
 import { rmSync } from 'node:fs';
-import { Compose, dockerAvailable } from '../compose.ts';
-import { pidAlive, saveState, unregisterInstance } from '../instance.ts';
-import { freePort, killTree } from '../proc.ts';
-import { die, note, say, sleep, warn } from '../ui.ts';
-import { control, liveSupervisor, resolveServices, type Context } from './common.ts';
-import { start, type StartFlags } from './start.ts';
-import { printStatus } from './status.ts';
+import { Compose, dockerAvailable } from '../compose.js';
+import { pidAlive, saveState, unregisterInstance } from '../instance.js';
+import { killTree, ownsRecordedProcess } from '../proc.js';
+import { die, note, say, sleep, warn } from '../ui.js';
+import { control, liveSupervisor, resolveServices, type Context } from './common.js';
+import { start, type StartFlags } from './start.js';
+import { printStatus } from './status.js';
 import { join } from 'node:path';
 
 export async function stop(ctx: Context, names: string[], flags: { hard: boolean }): Promise<void> {
@@ -34,27 +34,36 @@ async function stopOrphans(ctx: Context, volumes: boolean): Promise<void> {
     const state = ctx.state;
     if (!state) { warn(`nothing recorded for stack ${ctx.id}`); return; }
     if (state.supervisorPid && pidAlive(state.supervisorPid)) {
-        warn(`supervisor ${state.supervisorPid} is alive but unresponsive — killing it`);
-        await killTree(state.supervisorPid, 5000);
+        if (ownsRecordedProcess(state.supervisorPid, state.supervisorFingerprint)) {
+            warn(`supervisor ${state.supervisorPid} is alive but unresponsive — stopping the verified process`);
+            await killTree(state.supervisorPid, 5000);
+        } else {
+            warn(`refusing to signal supervisor pid ${state.supervisorPid}: its process identity no longer matches the recorded process`);
+        }
     }
-    let swept = 0;
+    let stopped = 0;
     for (const [name, rec] of Object.entries(state.services)) {
-        if (rec.pid && pidAlive(rec.pid)) { note(`stopping ${name} (pid ${rec.pid})`); await killTree(rec.pid); swept++; }
-        const pids = await freePort(rec.port);
-        if (pids.length) { note(`killed ${pids.join(',')} still listening on :${rec.port} (${name})`); swept++; }
+        if (rec.pid && ownsRecordedProcess(rec.pid, rec.processFingerprint)) {
+            note(`stopping ${name} (verified pid ${rec.pid})`);
+            await killTree(rec.pid);
+            stopped++;
+        } else if (rec.pid && pidAlive(rec.pid)) {
+            warn(`refusing to signal pid ${rec.pid} for ${name}: its process identity no longer matches the recorded process`);
+        }
         rec.state = 'stopped'; rec.pid = undefined;
     }
-    if (swept === 0) note('no service processes left from the previous run');
+    if (stopped === 0) note('no verified service processes left from the previous run');
     if ((state.infraUp || volumes) && ctx.catalog.config.compose) {
         if (dockerAvailable().ok) {
             say(volumes ? 'stopping infra containers and deleting volumes' : 'stopping infra containers (volumes kept)');
-            const compose = new Compose(ctx.root, state.project, ctx.paths.composeEnv, ctx.paths.composeOverride, join(ctx.paths.logs, 'compose.log'), ctx.catalog.config.compose.file);
+            const compose = new Compose(ctx.root, state.project, ctx.paths.composeEnv, ctx.paths.composeOverride, join(ctx.paths.logs, 'compose.log'), ctx.catalog.config.compose.files);
             const res = await compose.down(volumes);
             if (res.code !== 0) warn(res.out.trim().split('\n').at(-1) ?? 'docker compose down failed');
         } else warn('docker is not running; containers left as they are');
         state.infraUp = false;
     }
     state.supervisorPid = undefined;
+    state.supervisorFingerprint = undefined;
     saveState(ctx.paths, state);
     unregisterInstance(ctx.key);
     rmSync(ctx.paths.socket, { force: true });

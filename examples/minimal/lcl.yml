@@ -1,0 +1,11 @@
+version: 1
+name: minimal
+
+services:
+  api:
+    command: [node, server.mjs, "${port.api.http}"]
+    ports: { http: 8080 }
+    health: { type: http, port: http, path: /health }
+
+urls:
+  - { label: api, url: "http://localhost:${port.api.http}" }

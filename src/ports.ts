@@ -4,9 +4,9 @@
 
 import { createServer } from 'node:net';
 import { execFileSync } from 'node:child_process';
-import type { Catalog } from './catalog.ts';
-import { listInstances, type PortMap } from './instance.ts';
-import { die } from './ui.ts';
+import type { Catalog } from './catalog.js';
+import { listInstances, type PortMap } from './instance.js';
+import { die } from './ui.js';
 
 export const DEFAULT_STEP = 1000;
 const MAX_OFFSET_STEPS = 50;
@@ -48,11 +48,18 @@ export function listenersOnPort(port: number): number[] {
 
 export function shiftedPorts(catalog: Catalog, offset: number): PortMap {
     const services: Record<string, number> = {};
-    for (const s of catalog.services) if (s.port !== undefined) services[s.name] = s.port + offset;
-    for (const [name, c] of Object.entries(catalog.containers)) services[name] = c.port + offset;
+    for (const service of catalog.services) {
+        for (const [name, port] of Object.entries(service.ports)) services[`${service.name}.${name}`] = shifted(port, offset);
+    }
     const infra: Record<string, number> = {};
-    for (const i of catalog.infra) infra[i.key] = i.port + offset;
+    for (const i of catalog.infra) infra[i.key] = shifted(i.port, offset);
     return { offset, services, infra };
+}
+
+function shifted(port: number, offset: number): number {
+    const value = port + offset;
+    if (value > 65535) die(`port ${port} shifted by ${offset} exceeds 65535; reduce ports.step or choose a smaller offset`);
+    return value;
 }
 
 /** Ports reserved by other running stacks (alive or not yet listening), so two starts never race for a port. */
@@ -92,7 +99,7 @@ export async function allocatePorts(
     const reserved = reservedByOthers(selfKey);
     // Every service port counts (any of them may be started later in this stack), but only the infra containers
     // this start brings up — grafana's 3000 must not push a stack that never starts grafana to another offset.
-    const relevant = new Set<string>(catalog.services.map((s) => s.name));
+    const relevant = new Set<string>(Object.keys(catalog.configuredPorts));
     for (const i of catalog.infra) if (composeServices.includes(i.compose)) relevant.add(i.key);
     const candidates: number[] = [];
     const OFFSET_STEP = catalog.config.ports.step || DEFAULT_STEP;

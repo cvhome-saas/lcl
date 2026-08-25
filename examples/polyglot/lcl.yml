@@ -1,0 +1,25 @@
+version: 1
+name: polyglot
+
+services:
+  java-api:
+    cwd: java-api
+    command: [./gradlew, bootRun, "--args=--server.port=${port.java-api.http}"]
+    ports: { http: 8080 }
+    health: { type: http, port: http, path: /actuator/health, timeout: 180 }
+
+  python-api:
+    cwd: python-api
+    command: [python, -m, uvicorn, app:app, --port, "${port.python-api.http}"]
+    ports: { http: 8081 }
+    health: { type: http, port: http, path: /health }
+
+  node-web:
+    cwd: node-web
+    command: [npm, run, dev, "--", --port, "${port.node-web.http}"]
+    depends-on: [java-api, python-api]
+    ports: { http: 3000 }
+    environment:
+      JAVA_API_URL: "http://localhost:${port.java-api.http}"
+      PYTHON_API_URL: "http://localhost:${port.python-api.http}"
+    health: { type: http, port: http, path: / }

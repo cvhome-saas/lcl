@@ -1,11 +1,11 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { dockerAvailable } from '../compose.ts';
-import { listInstances, pidAlive } from '../instance.ts';
-import { conflicts, shiftedPorts } from '../ports.ts';
-import { green, red, yellow } from '../ui.ts';
-import type { Context } from './common.ts';
+import { dockerAvailable } from '../compose.js';
+import { listInstances, pidAlive } from '../instance.js';
+import { conflicts, shiftedPorts } from '../ports.js';
+import { green, red, yellow } from '../ui.js';
+import type { Context } from './common.js';
 
 export async function doctor(ctx: Context): Promise<void> {
     let problems = 0;
@@ -15,14 +15,10 @@ export async function doctor(ctx: Context): Promise<void> {
 
     if (ctx.catalog.config.compose) { const docker = dockerAvailable(); docker.ok ? ok('docker is running') : bad(docker.reason!); }
     else ok('no compose section — Docker not needed');
-    const types = new Set(ctx.catalog.services.map((s) => s.def.type));
     const tools: string[][] = [['lsof', '-v']];
-    if (types.has('gradle') || types.has('maven')) tools.push(['java', '-version']);
-    if (types.has('npm')) tools.push(['node', '--version'], ['npm', '--version']);
     for (const tool of tools) {
         try { execFileSync(tool[0], [tool[1]], { stdio: 'ignore' }); ok(`${tool[0]} on PATH`); } catch { bad(`${tool[0]} not on PATH`); }
     }
-    if (types.has('gradle')) existsSync(join(ctx.root, 'gradlew')) ? ok('gradlew present') : bad('gradlew missing (gradle services need it)');
 
     // hostnames the project expects to resolve locally (lcl.yml `hosts`)
     const wanted = ctx.catalog.config.hosts;
@@ -32,20 +28,16 @@ export async function doctor(ctx: Context): Promise<void> {
         missing.length === 0 ? ok(`/etc/hosts has all ${wanted.length} hostnames from lcl.yml`) : bad(`/etc/hosts is missing: ${missing.join(', ')}`);
     }
 
-    for (const s of ctx.catalog.services) {
-        if (s.def.type !== 'npm') continue;
-        const installDir = s.def.install ?? s.def.dir ?? '.';
-        existsSync(join(ctx.root, installDir, 'node_modules')) ? ok(`${s.name}: node_modules present`) : meh(`${s.name}: node_modules missing (start runs npm install)`);
+    for (const service of ctx.catalog.services) {
+        const cwd = join(ctx.root, service.def.cwd ?? '.');
+        existsSync(cwd) ? ok(`${service.name}: cwd exists`) : bad(`${service.name}: cwd does not exist: ${service.def.cwd}`);
     }
-    const byType = (t: string) => ctx.catalog.services.filter((s) => s.def.type === t).length;
-    ok(`${ctx.configFile}: ${byType('gradle')} gradle, ${byType('maven')} maven, ${byType('npm')} npm, ${byType('exec')} exec service(s); ${Object.keys(ctx.catalog.containers).join(', ') || 'no'} container service(s)${ctx.catalog.config.compose ? `; ${ctx.catalog.infra.length} published ports in ${ctx.catalog.composeServices.length} compose services (${ctx.catalog.config.compose.file})` : ''}`);
+    ok(`${ctx.configFile}: schema v1, ${ctx.catalog.services.length} source service(s)${ctx.catalog.config.compose ? `; ${ctx.catalog.infra.length} published ports in ${ctx.catalog.composeServices.length} Compose service(s) (${ctx.catalog.config.compose.files.join(', ')})` : ''}`);
     for (const f of ctx.catalog.config.files) existsSync(join(ctx.root, f.template)) ? ok(`template ${f.template}`) : bad(`template missing: ${f.template}`);
     for (const h of ctx.catalog.config.hooks.afterUp) ctx.catalog.services.some((s) => s.name === h.service) ? ok(`hook after-up ${h.service}`) : bad(`hook after-up references unknown service ${h.service}`);
     if (ctx.catalog.config.hooks.beforeStart.length) ok(`${ctx.catalog.config.hooks.beforeStart.length} before-start hook(s)`);
     if (ctx.catalog.config.hooks.afterStop.length) ok(`${ctx.catalog.config.hooks.afterStop.length} after-stop hook(s)`);
-    ctx.catalog.unknown.length === 0
-        ? ok('every service in lcl.yml is runnable')
-        : bad(`lcl.yml services that cannot run: ${ctx.catalog.unknown.join(', ')}`);
+    ok('every service in lcl.yml is structurally runnable');
 
     // registry
     const instances = listInstances();

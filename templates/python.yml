@@ -1,0 +1,11 @@
+version: 1
+name: __PROJECT__
+
+services:
+  api:
+    command: [python, -m, uvicorn, app:app, --port, "${port.api.http}"]
+    ports: { http: 8000 }
+    health: { type: http, port: http, path: /health }
+
+urls:
+  - { label: api, url: "http://localhost:${port.api.http}" }

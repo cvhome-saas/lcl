@@ -1,13 +1,13 @@
 import { spawn } from 'node:child_process';
 import { mkdirSync, openSync, closeSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import type { Catalog } from '../catalog.ts';
-import { request } from '../control.ts';
-import { pidAlive, type StartOptions, type State } from '../instance.ts';
-import { allocatePorts, DEFAULT_STEP } from '../ports.ts';
-import { die, dim, green, note, say, sleep, warn, yellow } from '../ui.ts';
-import { control, liveSupervisor, resolveServices, type Context } from './common.ts';
-import { printStatus } from './status.ts';
+import { dependencyClosure, type Catalog } from '../catalog.js';
+import { request } from '../control.js';
+import { composeProjectName, newStateIdentity, pidAlive, type StartOptions, type State } from '../instance.js';
+import { allocatePorts, DEFAULT_STEP } from '../ports.js';
+import { die, dim, green, note, say, sleep, warn, yellow } from '../ui.js';
+import { control, liveSupervisor, resolveServices, type Context } from './common.js';
+import { printStatus } from './status.js';
 
 export type StartFlags = {
     detach: boolean; build: boolean; noInfra: boolean; infra?: string; keepInfra: boolean; failFast: boolean;
@@ -15,18 +15,20 @@ export type StartFlags = {
 };
 
 export async function start(ctx: Context, names: string[], flags: StartFlags): Promise<void> {
-    const services = resolveServices(ctx, names);
+    const requested = resolveServices(ctx, names);
+    const closure = dependencyClosure(ctx.catalog, requested);
+    const services = requested.length ? closure.source : [];
     if (await liveSupervisor(ctx)) {
         if (services.length === 0) die(`stack ${ctx.id} is already running (supervisor ${ctx.state!.supervisorPid}). Use \`lcl restart\` or \`lcl stop\` first.`);
         say(`starting ${services.join(', ')} in the running stack ${ctx.id}`);
-        const records = await control(ctx, 'start', { services }, (m) => note(String(m))) as Array<{ state: string }>;
+        const records = await control(ctx, 'start', { services, infra: flags.noInfra ? [] : closure.compose }, (m) => note(String(m))) as Array<{ state: string }>;
         await printStatus(ctx);
         if (records.some((r) => r.state !== 'up')) process.exit(1);
         return;
     }
     if (ctx.state?.supervisorPid && pidAlive(ctx.state.supervisorPid)) die(`supervisor ${ctx.state.supervisorPid} is alive but not answering; run \`lcl stop\` first`);
 
-    const options = buildOptions(ctx.catalog, services, flags);
+    const options = buildOptions(ctx.catalog, services, closure.compose, flags);
     const previous = ctx.state?.ports.offset;
     const { ports, conflicts } = await allocatePorts(ctx.catalog, ctx.key, options.portsMode, previous, options.infra);
     if (conflicts.length) {
@@ -42,12 +44,14 @@ export async function start(ctx: Context, names: string[], flags: StartFlags): P
     }
 
     const state: State = {
-        id: ctx.id, key: ctx.key, root: ctx.root, configFile: ctx.configFile, project: `lcl-${ctx.catalog.config.name}-${ctx.id}`, ports, options, services: {}, infraUp: false,
+        ...newStateIdentity(),
+        id: ctx.id, key: ctx.key, root: ctx.root, configFile: ctx.configFile,
+        project: composeProjectName(ctx.catalog.config.name, ctx.id, ctx.root), ports, options, services: {}, infraUp: false,
     };
     mkdirSync(ctx.paths.dir, { recursive: true });
     const stateArg = JSON.stringify(state);
-    const entry = fileURLToPath(new URL('../main.ts', import.meta.url));
-    const nodeArgs = ['--disable-warning=ExperimentalWarning', entry, '__supervise', '--state', stateArg];
+    const entry = fileURLToPath(new URL('../main.js', import.meta.url));
+    const nodeArgs = [entry, '__supervise', '--state', stateArg];
 
     if (flags.detach) {
         const fd = openSync(ctx.paths.supervisorLog, 'w');
@@ -68,15 +72,16 @@ export async function start(ctx: Context, names: string[], flags: StartFlags): P
     await new Promise<void>((resolve) => child.on('exit', (code) => { process.exitCode = code ?? 1; resolve(); }));
 }
 
-function buildOptions(catalog: Catalog, services: string[], flags: StartFlags): StartOptions {
+function buildOptions(catalog: Catalog, services: string[], dependencyInfra: string[], flags: StartFlags): StartOptions {
     let infra: string[];
     if (flags.noInfra || !catalog.config.compose) infra = [];
     else if (!flags.infra || flags.infra === 'default') infra = catalog.config.compose.default.length ? catalog.config.compose.default : catalog.composeServices;
     else if (flags.infra === 'all') infra = catalog.composeServices;
     else {
         infra = flags.infra.split(',').map((s) => s.trim()).filter(Boolean);
-        for (const s of infra) if (!catalog.composeServices.includes(s)) die(`--infra: ${s} is not a service in ${catalog.config.compose?.file} (${catalog.composeServices.join(', ')})`);
+        for (const s of infra) if (!catalog.composeServices.includes(s)) die(`--infra: ${s} is not a configured Compose service (${catalog.composeServices.join(', ')})`);
     }
+    if (!flags.noInfra) infra = [...new Set([...infra, ...dependencyInfra])];
 
     let restart = 0;
     if (flags.restart) {

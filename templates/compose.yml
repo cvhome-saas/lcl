@@ -1,0 +1,8 @@
+version: 1
+name: __PROJECT__
+
+compose:
+  files: [compose.yml]
+  default: [postgres]
+
+services: {}

@@ -1,0 +1,11 @@
+version: 1
+name: __PROJECT__
+
+services:
+  app:
+    command: [npm, run, dev, "--", --port, "${port.app.http}"]
+    ports: { http: 3000 }
+    health: { type: http, port: http, path: / }
+
+urls:
+  - { label: app, url: "http://localhost:${port.app.http}" }

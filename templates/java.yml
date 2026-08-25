@@ -1,0 +1,11 @@
+version: 1
+name: __PROJECT__
+
+services:
+  api:
+    command: [./gradlew, bootRun, "--args=--server.port=${port.api.http}"]
+    ports: { http: 8080 }
+    health: { type: http, port: http, path: /actuator/health, timeout: 180 }
+
+urls:
+  - { label: api, url: "http://localhost:${port.api.http}" }

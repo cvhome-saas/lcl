@@ -1,0 +1,18 @@
+version: 1
+name: compose-stack
+
+ports: { step: 1000 }
+
+compose:
+  files: [compose.yml]
+  default: [postgres, redis]
+
+services:
+  api:
+    command: [node, ../minimal/server.mjs, "${port.api.http}"]
+    depends-on: [postgres, redis]
+    ports: { http: 8080 }
+    health: { type: http, port: http, path: /health }
+
+urls:
+  - { label: api, url: "http://localhost:${port.api.http}" }
