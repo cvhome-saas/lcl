@@ -1,11 +1,13 @@
 import { Ajv2020, type ErrorObject } from 'ajv/dist/2020.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
+import { parseEnv } from 'node:util';
 import { parse } from 'yaml';
 import { die } from './ui.js';
 
 export const CONFIG_FILE = 'lcl.yml';
 export const CONFIG_VERSION = 1;
+export const DOTENV_FILE = '.env';
 
 export type HealthType = 'http' | 'tcp' | 'log' | 'process';
 
@@ -47,6 +49,7 @@ export type Config = {
     build?: string[];
     compose?: { files: string[]; default: string[]; environment: Record<string, string> };
     hosts: string[];
+    dotenv: Record<string, string>;
     environment: Record<string, string>;
     defaults: { environment: Record<string, string>; prepare: CommandDef[]; health?: Health };
     files: Array<{ path: string; template: string }>;
@@ -79,6 +82,18 @@ export function findConfig(from = process.cwd(), explicit?: string): string {
     }
 }
 
+/** Optional project environment defaults from the `.env` beside lcl.yml. */
+export function loadDotEnv(root: string): Record<string, string> {
+    const file = resolve(root, DOTENV_FILE);
+    if (!existsSync(file)) return {};
+    try {
+        const parsed = parseEnv(readFileSync(file, 'utf8'));
+        return Object.fromEntries(Object.entries(parsed).filter((entry): entry is [string, string] => entry[1] !== undefined));
+    } catch (error) {
+        die(`${file}: cannot load ${DOTENV_FILE}: ${(error as Error).message}`);
+    }
+}
+
 export function loadConfig(file: string): Config {
     let raw: unknown;
     try {
@@ -88,6 +103,8 @@ export function loadConfig(file: string): Config {
     }
     if (!validateSchema(raw)) die(formatValidationErrors(file, validateSchema.errors ?? []));
 
+    const configFile = resolve(file);
+    const root = dirname(configFile);
     const top = raw as Raw;
     const defaultsRaw = asObject(top.defaults);
     const defaults = {
@@ -116,8 +133,8 @@ export function loadConfig(file: string): Config {
     const hooksRaw = asObject(top.hooks);
     const config: Config = {
         version: CONFIG_VERSION,
-        file: resolve(file),
-        root: dirname(resolve(file)),
+        file: configFile,
+        root,
         name: String(top.name),
         ports: {
             step: Number(asObject(top.ports).step ?? 1000),
@@ -130,6 +147,7 @@ export function loadConfig(file: string): Config {
             environment: stringMap(composeRaw.environment),
         } : undefined,
         hosts: stringList(top.hosts) ?? [],
+        dotenv: loadDotEnv(root),
         environment: stringMap(top.environment),
         defaults,
         files: array(top.files).map((value) => {

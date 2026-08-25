@@ -2,6 +2,7 @@ import { createServer } from 'node:http';
 
 const name = process.argv[2];
 const port = Number(process.argv[3]);
+for (const key of process.argv.slice(4)) console.log(`${key}=${process.env[key] ?? '<unset>'}`);
 const server = createServer((request, response) => {
     if (request.url === '/health') {
         response.setHeader('content-type', 'application/json');

@@ -321,10 +321,15 @@ export class Supervisor {
         return rt.record;
     }
 
-    /** Global env + the service's env from lcl.yml (templated) + LCL_PORT_* for every service and container port. */
+    /** Project .env defaults + generated LCL values + explicit global and service environment. */
     private serviceEnv(name?: string): NodeJS.ProcessEnv {
         const vars = this.vars(name);
-        const env: NodeJS.ProcessEnv = { LCL_STACK: this.state.id, LCL_STACK_DIR: this.paths.dir };
+        const env: NodeJS.ProcessEnv = {};
+        for (const [key, value] of Object.entries(this.catalog.config.dotenv)) {
+            if (process.env[key] === undefined) env[key] = value;
+        }
+        env.LCL_STACK = this.state.id;
+        env.LCL_STACK_DIR = this.paths.dir;
         for (const [n, port] of Object.entries(this.state.ports.services)) env[envName(n)] = String(port);
         for (const i of this.catalog.infra) env[i.envVar] = String(this.state.ports.infra[i.key]);
         const list = serviceList(this.catalog, this.state.ports);
