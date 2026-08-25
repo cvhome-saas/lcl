@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { dependencyClosure, loadCatalog } from '../src/catalog.js';
+import { dockerAvailable } from '../src/compose.js';
 import { interpolate, loadConfig } from '../src/config.js';
 import { CliError } from '../src/ui.js';
 
@@ -60,7 +61,7 @@ test('rejects duplicate ports and dependency cycles', () => {
     }
 });
 
-test('rejects ambiguous source and Compose services and host-port collisions', () => {
+test('rejects ambiguous source and Compose services and host-port collisions', { skip: !dockerAvailable().ok }, () => {
     const sameName = fixture('version: 1\nname: x\ncompose: { files: [compose.yml] }\nservices:\n  db: { command: [db] }\n');
     const samePort = fixture('version: 1\nname: x\ncompose: { files: [compose.yml] }\nservices:\n  api: { command: [api], ports: { http: 5432 } }\n');
     writeFileSync(join(sameName.directory, 'compose.yml'), 'services:\n  db:\n    image: postgres:17-alpine\n');
