@@ -17,9 +17,9 @@ GitHub release. npm trusted publishing then publishes the matching public packag
 
 The first release bootstraps the npm package before trusted publishing can be attached:
 
-1. Confirm the authenticated npm account has 2FA and write access to the `@cvhome` scope.
+1. Confirm the authenticated npm account has 2FA and write access to the `@cvhome-saas` scope.
 2. Publish the first version once with `npm publish --access public`.
-3. Run `npm trust github @cvhome/lcl --file publish.yml --repo cvhome-saas/lcl --allow-publish` with npm 11.15+
+3. Run `npm trust github @cvhome-saas/lcl --file publish.yml --repo cvhome-saas/lcl --allow-publish` with npm 11.15+
    or configure the same fields in the package settings on npmjs.com.
 4. Publish the matching GitHub release. The workflow accepts the existing bootstrap version; subsequent releases
    publish through short-lived OIDC credentials and receive npm provenance automatically.

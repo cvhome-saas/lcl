@@ -1,5 +1,5 @@
 {
-  "name": "@cvhome/lcl",
+  "name": "@cvhome-saas/lcl",
   "version": "0.1.0",
   "description": "Run, supervise, inspect, and port-shift complex local microservice stacks from one lcl.yml.",
   "keywords": ["microservices", "local-development", "process-supervisor", "docker-compose", "dev-tools"],

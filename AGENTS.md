@@ -4,7 +4,7 @@ This file is the working guide for AI coding agents contributing to `lcl`. It ap
 
 ## Orientation
 
-`lcl` is a public, language-neutral local stack runner distributed as `@cvhome/lcl`. A project keeps one
+`lcl` is a public, language-neutral local stack runner distributed as `@cvhome-saas/lcl`. A project keeps one
 `lcl.yml`; the CLI validates it, assigns ports, starts dependency-ordered foreground processes and optional Docker
 Compose services, checks readiness, records events and logs, and supervises several named stacks at once.
 

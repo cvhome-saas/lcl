@@ -11,7 +11,7 @@ The runner is language-neutral. If a service can be launched as a foreground com
 Node.js 22 or newer is required. macOS, Linux, and WSL2 are supported.
 
 ```bash
-npm install -g @cvhome/lcl
+npm install -g @cvhome-saas/lcl
 lcl --version
 ```
 
