@@ -79,3 +79,11 @@ test('interpolation is strict while environment lookup is explicit', () => {
     assert.equal(interpolate('http://localhost:${port.api.http}', { 'port.api.http': '8181' }), 'http://localhost:8181');
     assert.throws(() => interpolate('${missing}', {}), /unknown variable/);
 });
+
+test('loads optional project environment defaults beside lcl.yml', () => {
+    const item = fixture('version: 1\nname: dotenv\nservices: {}\n');
+    writeFileSync(join(item.directory, '.env'), 'PLAIN=value\nQUOTED="hello world"\nexport EXPORTED=yes\n');
+    try {
+        assert.deepEqual(loadConfig(item.file).dotenv, { PLAIN: 'value', QUOTED: 'hello world', EXPORTED: 'yes' });
+    } finally { rmSync(item.directory, { recursive: true, force: true }); }
+});

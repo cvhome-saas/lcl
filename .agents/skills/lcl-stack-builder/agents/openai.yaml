@@ -1,0 +1,4 @@
+interface:
+  display_name: "LCL Stack Builder"
+  short_description: "Design and validate complex local LCL stacks"
+  default_prompt: "Use $lcl-stack-builder to inspect this project and create a production-quality lcl.yml for its complete local development stack."

@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Load an optional `.env` beside `lcl.yml` as default environment for supervised source processes and lifecycle
+  commands, while preserving host and explicit configuration precedence.
+
 ## 0.1.0
 
 - Extract the runner from cvhome as a standalone public package.

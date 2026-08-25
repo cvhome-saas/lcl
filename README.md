@@ -123,6 +123,11 @@ services:
     health: { type: log, ready-log: "worker ready", timeout: 30 }
 ```
 
+Portless workers, file watchers, tunnels, webhook listeners, and similar tools are supervised like servers. They
+can reference the complete allocated port map, but should not declare a port unless they actually listen on it. See
+the runnable [`examples/long-running-tools`](examples/long-running-tools) example for log readiness, dependency
+ordering, cross-service forwarding, and automatic `.env` injection.
+
 The complete configuration contract is [`schema/lcl.schema.json`](schema/lcl.schema.json). Unknown keys and invalid
 combinations fail during `lcl validate`, before any process or container is started.
 
@@ -155,6 +160,18 @@ Variables available in commands, environment, hooks, generated files, and URLs i
 
 Every assigned port is also exported as an uppercase `LCL_PORT_*` environment variable. `lcl ports --env` prints the
 exact variables and resolved URLs for shell use.
+
+### Project `.env`
+
+If a `.env` file exists beside `lcl.yml`, LCL parses it with Node's dotenv rules and injects its values as defaults
+into source services, `prepare` commands, the optional build command, and hooks. This supports programs that do not
+load dotenv files themselves. No configuration field is required.
+
+Existing host variables override `.env`; generated `LCL_*` variables and explicit global or service `environment`
+values override both. `${env.NAME}` remains an explicit lookup of the environment supplied to the `lcl` process.
+LCL does not expand variable references inside `.env`, and Compose environment remains controlled by Compose and
+`compose.environment`. A running supervisor keeps the values loaded at stack start, so stop and start the stack to
+reload changes. Because `lcl why` shows resolved diagnostics, do not treat `.env` values as hidden output.
 
 ## Docker Compose
 

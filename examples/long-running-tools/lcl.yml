@@ -1,0 +1,24 @@
+version: 1
+name: long-running-tools
+
+ports: { step: 1000 }
+
+services:
+  payment:
+    description: Accepts mock webhook events and demonstrates automatic project .env injection.
+    command: [node, payment.mjs, "${port.payment.http}"]
+    ports: { http: 8080 }
+    health: { type: http, port: http, path: /health, expect: UP, timeout: 15 }
+
+  event-listener:
+    description: Models a foreground webhook CLI that does not listen on a local port.
+    command:
+      - node
+      - event-listener.mjs
+      - --forward-to
+      - "http://127.0.0.1:${port.payment.http}/webhook"
+    depends-on: [payment]
+    health: { type: log, ready-log: "event listener ready", timeout: 15 }
+
+urls:
+  - { label: payment, url: "http://localhost:${port.payment.http}" }
