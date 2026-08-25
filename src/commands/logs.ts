@@ -74,15 +74,17 @@ export async function why(ctx: Context, name: string): Promise<void> {
     if (!record) die(`${service} has not been started in stack ${ctx.id}`);
 
     const port = record.port;
-    console.log(`${bold(service)}  state=${record.state}  port=${port}  pid=${record.pid ?? '-'}${record.pid && !pidAlive(record.pid) ? red(' (dead)') : ''}  restarts=${restarts}`);
+    console.log(`${bold(service)}  state=${record.state}  port=${port || '-'}  pid=${record.pid ?? '-'}${record.pid && !pidAlive(record.pid) ? red(' (dead)') : ''}  restarts=${restarts}`);
     if (record.exitCode !== undefined && record.exitCode !== null) console.log(`exit code ${record.exitCode}${record.signal ? ` signal ${record.signal}` : ''}`);
     else if (record.signal) console.log(`killed by ${record.signal}`);
     if (record.health) console.log(`health: ${record.health}`);
-    const listeners = listenersOnPort(port);
-    const own = record.pid ? new Set([record.pid, ...descendants(record.pid)]) : new Set<number>();
-    const foreign = listeners.filter((p) => !own.has(p));
-    if (listeners.length) console.log(`port :${port} held by pid ${listeners.join(',')}${foreign.length && record.pid ? yellow(' (not this service!)') : own.size ? dim(' (child of the launcher)') : ''}`);
-    else console.log(`port :${port} is free`);
+    if (port) {
+        const listeners = listenersOnPort(port);
+        const own = record.pid ? new Set([record.pid, ...descendants(record.pid)]) : new Set<number>();
+        const foreign = listeners.filter((p) => !own.has(p));
+        if (listeners.length) console.log(`port :${port} held by pid ${listeners.join(',')}${foreign.length && record.pid ? yellow(' (not this service!)') : own.size ? dim(' (child of the launcher)') : ''}`);
+        else console.log(`port :${port} is free`);
+    }
     console.log(`log:  ${record.logFile}`);
     if (record.command) console.log(`cmd:  ${dim(`(cd ${record.cwd}) `)}${record.command.join(' ')}`);
     const interesting = Object.entries(env).filter(([k]) => !(k in process.env) || k.startsWith('LCL_') || k === 'PORT');

@@ -26,6 +26,8 @@ export function parseYaml(source: string): YamlValue {
             pos++;
             if (/^[|>][+-]?$/.test(rest)) { map[key] = blockScalar(rest, indent); continue; }
             if (rest !== '') { map[key] = scalar(rest); continue; }
+            // a flow collection on its own, deeper-indented line:  key:\n  [a, b]  or  { a: 1 }
+            if (pos < lines.length && lines[pos].indent > indent && /^[[{]/.test(lines[pos].text)) { map[key] = scalar(lines[pos++].text); continue; }
             if (pos < lines.length && lines[pos].indent > indent) map[key] = parseBlock(lines[pos].indent);
             else if (pos < lines.length && lines[pos].indent === indent && lines[pos].text.startsWith('- ')) map[key] = parseList(indent);
             else map[key] = null;

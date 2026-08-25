@@ -31,6 +31,18 @@ export class Compose {
     }
 
     up(services: string[]) { return this.run(['up', '-d', '--remove-orphans', ...services]); }
+
+    /** service → { state, health } from `compose ps`; health is '' when the image has no HEALTHCHECK. */
+    status(): Map<string, { state: string; health: string }> {
+        const out = new Map<string, { state: string; health: string }>();
+        try {
+            const text = execFileSync('docker', [...this.base(), 'ps', '--all', '--format', 'json'], { cwd: this.root, stdio: ['ignore', 'pipe', 'ignore'] }).toString();
+            for (const line of text.split('\n').filter(Boolean)) {
+                try { const j = JSON.parse(line) as { Service: string; State: string; Health: string }; out.set(j.Service, { state: j.State, health: j.Health ?? '' }); } catch { /* skip */ }
+            }
+        } catch { /* compose not running */ }
+        return out;
+    }
     down(volumes: boolean) { return this.run(['down', '--remove-orphans', ...(volumes ? ['-v'] : [])]); }
 
     /** Running containers of this project → compose service names. */

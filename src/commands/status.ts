@@ -32,13 +32,13 @@ export async function printStatus(ctx: Context, json = false): Promise<void> {
         const rec: ServiceRecord | undefined = state.services[s.name];
         const port = state.ports.services[s.name];
         if (!rec) {
-            const busy = await tcpOpen(port);
-            rows.push([s.name, busy ? yellow('port-used') : dim('not started'), String(port), '', '', '', '']);
+            const busy = port ? await tcpOpen(port) : false;
+            rows.push([s.name, busy ? yellow('port-used') : dim('not started'), port ? String(port) : '-', '', '', '', '']);
             continue;
         }
-        const alive = live ? rec.state : rec.pid && pidAlive(rec.pid) ? rec.state : await tcpOpen(port) ? 'port-used' : 'stopped';
+        const alive = live ? rec.state : rec.pid && pidAlive(rec.pid) ? rec.state : port && (await tcpOpen(port)) ? 'port-used' : 'stopped';
         rows.push([
-            s.name, colour(alive), String(port), rec.pid ? String(rec.pid) : '-',
+            s.name, colour(alive), port ? String(port) : '-', rec.pid ? String(rec.pid) : '-',
             rec.startedAt && (alive === 'up' || alive === 'degraded' || alive === 'starting') ? fmtDuration(Date.now() - Date.parse(rec.startedAt)) : '-',
             rec.errors ? (rec.errors > 0 ? yellow(String(rec.errors)) : '0') : '0',
             (rec.health ?? '').slice(0, 60),
@@ -70,7 +70,7 @@ export function printPorts(ctx: Context, mode: 'table' | 'json' | 'env'): void {
     if (!ctx.state) console.log(dim('(not started — configured ports; a start shifts them if any is taken)'));
     else console.log(`offset +${ports.offset}`);
     const rows: string[][] = [];
-    for (const s of ctx.catalog.services) rows.push([s.name, String(ports.services[s.name]), String(s.port), s.def.type === 'gradle' ? `gradle ${s.def.module}` : `${s.def.type} ${s.def.dir ?? ''} ${(s.def.command ?? []).join(' ')}`.trim()]);
+    for (const s of ctx.catalog.services) rows.push([s.name, s.port === undefined ? '-' : String(ports.services[s.name]), s.port === undefined ? '-' : String(s.port), s.def.type === 'gradle' ? `gradle ${s.def.module}` : `${s.def.type} ${s.def.dir ?? ''} ${(s.def.command ?? []).join(' ')}`.trim()]);
     for (const [name, c] of Object.entries(ctx.catalog.containers)) rows.push([name, String(ports.services[name]), String(c.port), `container (compose ${c.compose})`]);
     for (const i of ctx.catalog.infra) rows.push([i.label, String(ports.infra[i.key]), String(i.port), `container ${i.image}`]);
     console.log(table(rows, ['service', 'port', 'configured', 'runner']));

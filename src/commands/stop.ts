@@ -45,7 +45,7 @@ async function stopOrphans(ctx: Context, volumes: boolean): Promise<void> {
         rec.state = 'stopped'; rec.pid = undefined;
     }
     if (swept === 0) note('no service processes left from the previous run');
-    if (state.infraUp || volumes) {
+    if ((state.infraUp || volumes) && ctx.catalog.config.compose) {
         if (dockerAvailable().ok) {
             say(volumes ? 'stopping infra containers and deleting volumes' : 'stopping infra containers (volumes kept)');
             const compose = new Compose(ctx.root, state.project, ctx.paths.composeEnv, ctx.paths.composeOverride, join(ctx.paths.logs, 'compose.log'), ctx.catalog.config.compose.file);

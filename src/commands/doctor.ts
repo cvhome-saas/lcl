@@ -13,24 +13,23 @@ export async function doctor(ctx: Context): Promise<void> {
     const bad = (m: string) => { problems++; console.log(`  ${red('✗')} ${m}`); };
     const meh = (m: string) => console.log(`  ${yellow('!')} ${m}`);
 
-    const docker = dockerAvailable();
-    docker.ok ? ok('docker is running') : bad(docker.reason!);
+    if (ctx.catalog.config.compose) { const docker = dockerAvailable(); docker.ok ? ok('docker is running') : bad(docker.reason!); }
+    else ok('no compose section — Docker not needed');
     const types = new Set(ctx.catalog.services.map((s) => s.def.type));
     const tools: string[][] = [['lsof', '-v']];
-    if (types.has('gradle')) tools.push(['java', '-version']);
+    if (types.has('gradle') || types.has('maven')) tools.push(['java', '-version']);
     if (types.has('npm')) tools.push(['node', '--version'], ['npm', '--version']);
     for (const tool of tools) {
         try { execFileSync(tool[0], [tool[1]], { stdio: 'ignore' }); ok(`${tool[0]} on PATH`); } catch { bad(`${tool[0]} not on PATH`); }
     }
     if (types.has('gradle')) existsSync(join(ctx.root, 'gradlew')) ? ok('gradlew present') : bad('gradlew missing (gradle services need it)');
 
-    // /etc/hosts entries: the names configure-domain.sh appends
-    const script = join(ctx.root, 'extra/scripts/configure-domain.sh');
-    if (existsSync(script) && existsSync('/etc/hosts')) {
+    // hostnames the project expects to resolve locally (lcl.yml `hosts`)
+    const wanted = ctx.catalog.config.hosts;
+    if (wanted.length && existsSync('/etc/hosts')) {
         const hosts = readFileSync('/etc/hosts', 'utf8');
-        const wanted = [...readFileSync(script, 'utf8').matchAll(/append "127\.0\.0\.1 ([^"]+)"/g)].map((m) => m[1]);
-        const missing = wanted.filter((h) => !new RegExp(`^\\s*127\\.0\\.0\\.1\\s+.*\\b${h.replace(/\./g, '\\.')}\\b`, 'm').test(hosts));
-        missing.length === 0 ? ok(`/etc/hosts has all ${wanted.length} local hostnames`) : bad(`/etc/hosts is missing: ${missing.join(', ')} — run: sudo ./extra/scripts/configure-domain.sh`);
+        const missing = wanted.filter((h) => !new RegExp(`^\\s*(127\\.0\\.0\\.1|::1)\\s+.*\\b${h.replace(/\./g, '\\.')}\\b`, 'm').test(hosts));
+        missing.length === 0 ? ok(`/etc/hosts has all ${wanted.length} hostnames from lcl.yml`) : bad(`/etc/hosts is missing: ${missing.join(', ')}`);
     }
 
     for (const s of ctx.catalog.services) {
@@ -39,9 +38,11 @@ export async function doctor(ctx: Context): Promise<void> {
         existsSync(join(ctx.root, installDir, 'node_modules')) ? ok(`${s.name}: node_modules present`) : meh(`${s.name}: node_modules missing (start runs npm install)`);
     }
     const byType = (t: string) => ctx.catalog.services.filter((s) => s.def.type === t).length;
-    ok(`${ctx.configFile}: ${byType('gradle')} gradle, ${byType('npm')} npm, ${byType('exec')} exec service(s); ${Object.keys(ctx.catalog.containers).join(', ') || 'no'} container service(s); ${ctx.catalog.infra.length} published ports in ${ctx.catalog.composeServices.length} compose services (${ctx.catalog.config.compose.file})`);
+    ok(`${ctx.configFile}: ${byType('gradle')} gradle, ${byType('maven')} maven, ${byType('npm')} npm, ${byType('exec')} exec service(s); ${Object.keys(ctx.catalog.containers).join(', ') || 'no'} container service(s)${ctx.catalog.config.compose ? `; ${ctx.catalog.infra.length} published ports in ${ctx.catalog.composeServices.length} compose services (${ctx.catalog.config.compose.file})` : ''}`);
     for (const f of ctx.catalog.config.files) existsSync(join(ctx.root, f.template)) ? ok(`template ${f.template}`) : bad(`template missing: ${f.template}`);
     for (const h of ctx.catalog.config.hooks.afterUp) ctx.catalog.services.some((s) => s.name === h.service) ? ok(`hook after-up ${h.service}`) : bad(`hook after-up references unknown service ${h.service}`);
+    if (ctx.catalog.config.hooks.beforeStart.length) ok(`${ctx.catalog.config.hooks.beforeStart.length} before-start hook(s)`);
+    if (ctx.catalog.config.hooks.afterStop.length) ok(`${ctx.catalog.config.hooks.afterStop.length} after-stop hook(s)`);
     ctx.catalog.unknown.length === 0
         ? ok('every service in lcl.yml is runnable')
         : bad(`lcl.yml services that cannot run: ${ctx.catalog.unknown.join(', ')}`);

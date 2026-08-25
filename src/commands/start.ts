@@ -70,12 +70,12 @@ export async function start(ctx: Context, names: string[], flags: StartFlags): P
 
 function buildOptions(catalog: Catalog, services: string[], flags: StartFlags): StartOptions {
     let infra: string[];
-    if (flags.noInfra) infra = [];
+    if (flags.noInfra || !catalog.config.compose) infra = [];
     else if (!flags.infra || flags.infra === 'default') infra = catalog.config.compose.default.length ? catalog.config.compose.default : catalog.composeServices;
     else if (flags.infra === 'all') infra = catalog.composeServices;
     else {
         infra = flags.infra.split(',').map((s) => s.trim()).filter(Boolean);
-        for (const s of infra) if (!catalog.composeServices.includes(s)) die(`--infra: ${s} is not a service in ${catalog.config.compose.file} (${catalog.composeServices.join(', ')})`);
+        for (const s of infra) if (!catalog.composeServices.includes(s)) die(`--infra: ${s} is not a service in ${catalog.config.compose?.file} (${catalog.composeServices.join(', ')})`);
     }
 
     let restart = 0;
@@ -106,9 +106,9 @@ async function waitForReady(ctx: Context, supervisorPid: number, timeoutMs = 1_2
                 const key = `${name}:${r.state}`;
                 if (seen.has(key)) continue;
                 seen.add(key);
-                if (r.state === 'up') console.log(`    ${green(name.padEnd(20))} up on :${r.port}`);
+                if (r.state === 'up') console.log(`    ${green(name.padEnd(20))} up${r.port ? ` on :${r.port}` : ''}`);
                 else if (r.state === 'crashed' || r.state === 'degraded') console.log(`    ${yellow(name.padEnd(20))} ${r.state}: ${r.health ?? ''}`);
-                else if (r.state === 'starting') console.log(`    ${dim(name.padEnd(20))} starting on :${r.port}`);
+                else if (r.state === 'starting') console.log(`    ${dim(name.padEnd(20))} starting${r.port ? ` on :${r.port}` : ''}`);
             }
             if (snap.phase === 'running') {
                 const wanted = snap.state.options.services.length ? snap.state.options.services : Object.keys(snap.state.services);

@@ -3,7 +3,7 @@
 
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, renameSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { die } from './ui.ts';
 import { findConfig } from './config.ts';
@@ -85,7 +85,8 @@ export function paths(root: string, stack: string): Paths {
         instanceYml: join(dir, 'lcl-instance.yml'),
         composeEnv: join(dir, 'compose.env'),
         composeOverride: join(dir, 'compose.override.yml'),
-        socket: join(dir, 'control.sock'),
+        // unix socket paths are limited to ~104 bytes on macOS: keep it short and outside the (possibly deep) checkout
+        socket: join(tmpdir(), `lcl-${registryKey(root, stack)}.sock`),
         supervisorLog: join(dir, 'supervisor.log'),
     };
 }

@@ -48,7 +48,7 @@ export function listenersOnPort(port: number): number[] {
 
 export function shiftedPorts(catalog: Catalog, offset: number): PortMap {
     const services: Record<string, number> = {};
-    for (const s of catalog.services) services[s.name] = s.port + offset;
+    for (const s of catalog.services) if (s.port !== undefined) services[s.name] = s.port + offset;
     for (const [name, c] of Object.entries(catalog.containers)) services[name] = c.port + offset;
     const infra: Record<string, number> = {};
     for (const i of catalog.infra) infra[i.key] = i.port + offset;

@@ -28,7 +28,8 @@ ports:
   step: 1000                          # shift size when a configured port is taken
   skip-configured: false              # true: never use the configured ports (same as --no-default-ports)
 build: [make, build]                  # run by `lcl start --build`
-compose:
+hosts: [api.local, app.local]         # optional: hostnames `lcl doctor` expects in /etc/hosts
+compose:                              # optional: omit it and no Docker is needed
   file: docker-compose.yml
   default: [postgres]                 # started by `lcl start`; `--infra all` / `--infra a,b` override
   env: { NAMESPACE: example.com }     # extra compose env (LCL_PORT_<SERVICE> is always provided)
@@ -39,22 +40,33 @@ defaults:                             # per runner type, overridden by each serv
   gradle: { task: bootRun, args: [...], health: { path: /actuator/health, expect: '"status":"UP"' } }
 services:
   api:      { type: gradle, module: ":api", port: 8080 }
-  worker:   { type: gradle, module: ":worker", after: [api] }
-  web:      { type: npm, dir: web, command: [npm, run, dev], env: { PORT: "${port}" }, after: [api] }
-  db-admin: { type: exec, command: [./bin/admin, --port, "${port}"], port: 7000 }
+  billing:  { type: maven, module: billing, port: 8081, after: [api] }        # ./mvnw -pl billing spring-boot:run
+  worker:   { type: gradle, module: ":worker", after: [api] }                 # no port: up = process alive
+  indexer:  { type: exec, command: [./indexer], health: { ready-log: "listening" }, after: [api] }
+  web:      { type: npm, dir: web, command: [npm, run, dev], env: { PORT: "${port}" }, port: 3000, after: [api] }
+  grpc:     { type: exec, command: [./bin/grpc, --port, "${port}"], port: 7000, health: { type: tcp } }
   edge:     { type: container, compose: nginx, port: 80 }        # a configured service served by a container
 hooks:
-  after-up:
-    - { service: api, when: "${offset} != 0", shell: "curl -X POST http://localhost:${port.api}/reconfigure" }
+  before-start: [{ shell: "./scripts/seed.sh ${port.postgres:5432}" }]
+  after-up:     [{ service: api, when: "${offset} != 0", shell: "curl -X POST http://localhost:${port.api}/reconfigure" }]
+  after-stop:   [{ shell: "echo bye" }]
 urls:
   - { label: app, url: "http://localhost:${port.web}" }
 ```
 
-Service fields: `type` (`gradle` | `npm` | `exec` | `container`), `port`, `after`
-(start order; independent services start together with `--parallel N`), `env`, `health`
-(`path`, `expect`, `ready-log` regex, `timeout` seconds); gradle: `module`, `task`, `args`; npm/exec: `dir`,
-`command`, `install` (where `node_modules` lives; `npm install` runs when missing), `prep` (commands before start);
-container: `compose` service name, `container-port`.
+Service fields: `type` (`gradle` | `maven` | `npm` | `exec` | `container`), `port` (optional — a service without
+one is a worker: no port allocation, health = process alive or `ready-log`), `after` (start order; independent
+services start together with `--parallel N`), `env`, `health`; gradle/maven: `module`, `task`, `args`, `wrapper`
+(`./gradlew` / `./mvnw` by default); every process type: `dir`, `command`, `prep` (commands before start), and
+for npm `install` (where `node_modules` lives; `npm install` runs when missing); container: `compose` service
+name, `container-port`.
+
+Health: `type` = `http` (GET `path` on the port, optional `expect` substring; 401/403 count as reachable) |
+`tcp` (port accepts connections) | `log` (`ready-log` regex seen) | `none` (process alive). Defaults: `http` when
+`path` is set, `tcp` when the service has a port, `log`/`none` otherwise. `timeout` = seconds to become healthy.
+
+Containers: started with `docker compose -p lcl-<name>-<stack>`; those with a `HEALTHCHECK` are waited for until
+`healthy`, the others until their published ports accept connections. `--no-infra` skips them.
 
 Variables in any string: `${stack}` `${stack.dir}` `${root}` `${project}` `${offset}` `${service}` `${port}`
 `${port.<service>}` `${port.<compose service>:<container port>}` `${env.NAME}`. Env values and template files also
@@ -111,4 +123,5 @@ extra/lcl/src
   commands/        start, stop/restart, status/urls/ports/list, logs/events/why/clean, doctor
 ```
 
-No dependencies: Node ≥ 23.6 runs the TypeScript directly.
+No dependencies: Node ≥ 23.6 runs the TypeScript directly. POSIX only (macOS/Linux/WSL): process groups, `lsof`,
+`pgrep`, `sh -c` hooks and unix sockets are used.
