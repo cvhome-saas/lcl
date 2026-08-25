@@ -1,0 +1,12 @@
+{
+  "name": "@cvhome/lcl",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local stack runner: several independent instances of the cvhome stack, one per git worktree.",
+  "type": "module",
+  "bin": { "lcl": "./bin/lcl.js" },
+  "engines": { "node": ">=23.6" },
+  "scripts": {
+    "check": "tsc --noEmit -p tsconfig.json"
+  }
+}
