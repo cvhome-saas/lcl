@@ -27,6 +27,61 @@ lcl.yml
   -> status/logs/why/stop commands
 ```
 
+## Working conventions (org standard — the same in every cvhome-saas repo)
+
+`lcl` is part of the `cvhome-saas` organisation. Cross-repo routing, review and releases live in
+`cvhome-saas/orchestrator`; this file is the repo's own rulebook. The rules below are the org standard reconciled
+with lcl's own rules; where the two differ, lcl's rule (stated in the section that owns it) wins until the maintainer
+decides otherwise.
+
+- **`main` is the integration branch.** Every change lands by PR into `main`; nobody commits or pushes to `main`
+  directly. Versions are `vX.Y.Z` git tags cut by the orchestrator's `Release` workflow, never by hand. `lcl`
+  carries the product tag, and `.github/workflows/publish.yml` publishes to npm on the GitHub release event. Until
+  the orchestrator's migration step 8 changes it, `package.json` and `src/version.ts` keep identical versions and
+  `test/lifecycle.test.ts` keeps enforcing that (see *For versioning or publishing*); an ordinary change does not
+  touch either version, and the release tag must equal `v<package-version>` (`publish.yml` checks it).
+- **Every change starts as a fresh worktree cut from up-to-date `main`, before the first file is written** — this
+  is the org's default form of lcl's own rule *work on a feature branch unless the maintainer explicitly requests
+  another workflow*:
+
+  ```bash
+  git fetch origin
+  git worktree add --no-track .claude/worktrees/<type>-<short-name> -b <type>/<short-name> origin/main
+  ```
+
+  `<type>` ∈ `feat|fix|docs|chore|refactor|test`. Work, build and verify from inside that worktree; the primary
+  checkout stays clean on `main`. `.claude/hooks/worktree-guard.mjs` denies any edit in the primary checkout
+  (`ALLOW_MAIN_WRITES=1` is the person's deliberate escape hatch, never the agent's). A maintainer may still ask for
+  a plain branch, and lcl's maintainer rule stands unchanged: **do not commit or push on the user's behalf unless
+  asked** — the worktree, `/go` and the push receipt change how a change ships, not who decides that it ships.
+- **A plan is phases; a phase is one PR.** Anything bigger than one PR starts as
+  `.agents/plans/<kebab-name>.md` (template: `.agents/plans/README.md`): context, why the design is what it
+  is, then `## Phase N — <area> (PR N)` sections each small enough to review in one sitting, then
+  deviations as built and verification. One plan, one worktree, one branch; each phase is committed and
+  shipped as its own PR before the next begins (stacked if it must). A plan that touches another repo (cvhome's
+  `lcl.yml`, load-testing's `lcl urls` reading, the docs site) names it and hands that phase to the orchestrator
+  (`cross-repo-change`).
+- **Nothing is pushed until the gates have passed locally.** `scripts/verify.sh` runs exactly what CI runs
+  (`scripts/verify.steps.sh`: `npm ci`, `npm run check`, `npm test`, `npm pack --dry-run`) and writes a receipt for
+  the exact tree; `.githooks/pre-push` and `.claude/hooks/push-guard.mjs` refuse a push without it, a push to
+  `main`, and `--no-verify`. Without Docker the run uses `CI_NO_DOCKER=1` and says so; Compose behaviour is then
+  not verified, exactly as *Development commands* states.
+- **`/go` ships the working tree** (commit → verify → push → PR into `main`, template filled, changelog
+  label); **`/reset` returns to a clean `main`** without losing work. Both in `.claude/commands/`. Both are run
+  only when the user asks to ship or reset.
+- **PR body follows `.github/PULL_REQUEST_TEMPLATE.md`**: *Why → What → The parts that are not obvious →
+  Deviations → Verification*. Label it: `type/enhancement|bug|documentation|test|chore|dependency-upgrade`,
+  `warn/api-change|behavior-change|deprecation|regression|blocker`, `ignore-changelog`.
+  `.github/release.yml` turns labels into release notes; the orchestrator turns them into the version bump.
+- **QA is a file that travels with the code.** A user-visible behaviour of the CLI is not done until it has a case
+  in `qa/lcl-qa.md` (template: `qa/README.md`), tagged **[verified]** / **[not verified]**, with setup, steps and
+  expected result. Tests prove a unit; the QA file proves the path a person takes at the terminal.
+- **No design gate here.** lcl has no screens, so the org's design-portal rule and `design-guard` hook do not apply.
+- **None of the standard's files ship in the npm package.** `.claude/`, `.agents/`, `.githooks/`, `qa/` and
+  `scripts/` stay outside the `package.json` `files` allowlist; `npm pack --dry-run` is the proof, every time.
+- **Commit messages**: `<type|area>: <what changed>`, imperative, plus a body when the change is not
+  self-evident, ending with `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`.
+
 ## Project structure
 
 | Path | Responsibility |
@@ -214,6 +269,8 @@ For port or Compose behavior:
 For versioning or publishing:
 
 - Keep `package.json` and `src/version.ts` versions identical; `test/lifecycle.test.ts` enforces this.
+  The release tag itself is cut by the orchestrator's `Release` workflow (*Working conventions*); this equality
+  rule stays as written until the orchestrator's migration step 8 changes it.
 - Update `CHANGELOG.md`, review the npm file allowlist, and run the release checklist.
 - The package `files` allowlist and `.npmignore` must never include runtime `.lcl` state.
 - Do not publish, tag, create a GitHub release, or change npm trust without explicit maintainer authorization.
@@ -231,6 +288,10 @@ Before saying a change is done:
 - [ ] Schema, parser, runtime, examples, and templates agree when configuration changed.
 - [ ] Process ownership, stack isolation, port shifting, and safe deletion remain intact.
 - [ ] `git diff --check` is clean and unrelated working-tree changes are untouched.
+- [ ] `scripts/verify.sh` is green for the exact tree being pushed (it runs the four gates above and writes the push receipt).
+- [ ] User-visible CLI behaviour has a case in `qa/lcl-qa.md`, tagged `[verified]` or `[not verified]` honestly.
 
 Work on a feature branch unless the maintainer explicitly requests another workflow. Do not commit or push on the
 user's behalf unless asked.
+The org's default form of that feature branch is the worktree described under *Working conventions*; that section
+keeps both of these sentences in force.

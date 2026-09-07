@@ -3,3 +3,5 @@ dist/
 *.tgz
 .lcl/
 .idea/*
+.claude/worktrees/
+.DS_Store
