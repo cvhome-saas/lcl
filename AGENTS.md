@@ -54,11 +54,13 @@ decides otherwise.
   (`ALLOW_MAIN_WRITES=1` is the person's deliberate escape hatch, never the agent's). A maintainer may still ask for
   a plain branch, and lcl's maintainer rule stands unchanged: **do not commit or push on the user's behalf unless
   asked** — the worktree, `/go` and the push receipt change how a change ships, not who decides that it ships.
-- **A plan is phases; a phase is one PR.** Anything bigger than one PR starts as
+- **A plan is one PR; each phase is one commit.** Anything bigger than one commit starts as
   `.agents/plans/<kebab-name>.md` (template: `.agents/plans/README.md`): context, why the design is what it
-  is, then `## Phase N — <area> (PR N)` sections each small enough to review in one sitting, then
-  deviations as built and verification. One plan, one worktree, one branch; each phase is committed and
-  shipped as its own PR before the next begins (stacked if it must). A plan that touches another repo (cvhome's
+  is, then `## Phase N — <area>` sections each small enough to review in one sitting, then
+  deviations as built and verification. One plan, one worktree, one branch, **one PR**; each phase is a
+  commit on it, easiest first, so a reviewer reads the sequence and any one phase can be reverted alone.
+  Never a PR per phase: stacked PRs re-conflict each other on every merge and each has to re-earn its
+  verify receipt. A plan that touches another repo (cvhome's
   `lcl.yml`, load-testing's `lcl urls` reading, the docs site) names it and hands that phase to the orchestrator
   (`cross-repo-change`).
 - **Nothing is pushed until the gates have passed locally.** `scripts/verify.sh` runs exactly what CI runs
